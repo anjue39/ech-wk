@@ -94,26 +94,26 @@ jobs:
           fi
           
           # 创建 README
-          cat > release/README.txt << 'EOF'
-ECH Workers Client
-
-Files:
-- ech-workers(.exe): Go compiled core proxy program
-- gui.py: Python GUI client
-- requirements.txt: Python dependencies
-- run.sh / run.bat: Launch script
-
-Usage:
-1. Install Python 3.6+ (if not already installed)
-2. Install dependencies: pip install PyQt5
-3. Run: python gui.py
-   Or use launch script: ./run.sh (Mac) or run.bat (Windows)
-
-System Requirements:
-- Windows: Windows 10+
-- macOS: macOS 10.13+
-- Python: 3.6+
-EOF
+          {
+            echo "ECH Workers Client"
+            echo ""
+            echo "Files:"
+            echo "- ech-workers(.exe): Go compiled core proxy program"
+            echo "- gui.py: Python GUI client"
+            echo "- requirements.txt: Python dependencies"
+            echo "- run.sh / run.bat: Launch script"
+            echo ""
+            echo "Usage:"
+            echo "1. Install Python 3.6+ (if not already installed)"
+            echo "2. Install dependencies: pip install PyQt5"
+            echo "3. Run: python gui.py"
+            echo "   Or use launch script: ./run.sh (Mac) or run.bat (Windows)"
+            echo ""
+            echo "System Requirements:"
+            echo "- Windows: Windows 10+"
+            echo "- macOS: macOS 10.13+"
+            echo "- Python: 3.6+"
+          } > release/README.txt
         shell: bash
 
       - name: Create archive (Windows)
