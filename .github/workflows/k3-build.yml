@@ -1,0 +1,29 @@
+name: K3-Go-IPK-Build
+on:
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: '1.21'
+      - name: Build Binary (ARMv7 Static)
+        run: |
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm GOARM=7 go build -trimpath -ldflags="-s -w" -o ech-workers ech-workers.go
+          mkdir -p luci/root/usr/bin/
+          mv ech-workers luci/root/usr/bin/
+          chmod +x luci/root/usr/bin/ech-workers
+      - name: Build IPK via SDK
+        uses: immortalwrt/gh-action-sdk@master
+        with:
+          architecture: arm_cortex-a9_vfpv3-d16
+          pkgdir: luci
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: k3-ipk-package
+          path: bin/targets/arm_cortex-a9_vfpv3-d16/packages/*.ipk
