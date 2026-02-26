@@ -20,11 +20,21 @@ jobs:
 
       - name: Build Binary (ARMv7 Static)
         run: |
+          # 1. 确保在源码根目录下初始化 Go 环境
+          if [ ! -f "go.mod" ]; then
+            go mod init ech-workers
+          fi
+          
+          # 2. 自动下载缺失的依赖 (如 gorilla/websocket)
+          go mod tidy
+          
+          # 3. 执行静态编译
           CGO_ENABLED=0 GOOS=linux GOARCH=arm GOARM=7 \
           go build -trimpath -ldflags="-s -w" -o ech-workers ech-workers.go
           
+          # 4. 准备打包目录结构
           mkdir -p luci/root/usr/bin/
-          mv ech-workers luci/root/usr/bin/
+          cp ech-workers luci/root/usr/bin/
           chmod +x luci/root/usr/bin/ech-workers
 
       - name: Build IPK via SDK
