@@ -1,4 +1,4 @@
-name: K3-Fast-IPK-Build
+name: K3-Fast-IPK-Build-Final
 
 on:
   workflow_dispatch:
@@ -12,44 +12,59 @@ jobs:
       - name: Checkout Source
         uses: actions/checkout@v4
 
-      - name: Set up Go
-        uses: actions/setup-go@v4
-        with:
-          go-version: '1.21'
-          cache: true
-
       - name: Build Binary and Pack IPK
         run: |
-          # 1. 编译 Go 二进制 (32位 ARMv7)
+          # 1. 编译 Go 核心
           [ -f "go.mod" ] || go mod init ech-workers
           go mod tidy
           CGO_ENABLED=0 GOOS=linux GOARCH=arm GOARM=7 \
           go build -trimpath -ldflags="-s -w" -o ech-workers ech-workers.go
 
-          # 2. 创建目录结构
-          mkdir -p ipk/usr/bin
-          mkdir -p ipk/etc/init.d
-          mkdir -p ipk/usr/lib/lua/luci/model/cbi
-          mkdir -p ipk/CONTROL
+          # 2. 创建所有必要的系统目录
+          # bin: 程序 | init.d: 启动脚本 | config: 基础配置 | cbi: 界面逻辑 | menu.d: 菜单权限
+          mkdir -p ipk/usr/bin ipk/etc/init.d ipk/etc/config \
+                   ipk/usr/lib/lua/luci/model/cbi ipk/usr/share/luci/menu.d ipk/CONTROL
 
-          # 3. 复制文件到对应位置
+          # 3. 复制核心文件
           cp ech-workers ipk/usr/bin/
           chmod +x ipk/usr/bin/ech-workers
-          cp luci/root/etc/init.d/ech-workers ipk/etc/init.d/
-          chmod +x ipk/etc/init.d/ech-workers
-          cp luci/root/usr/lib/lua/luci/model/cbi/ech-workers.lua ipk/usr/lib/lua/luci/model/cbi/
 
-          # 4. 手写 CONTROL 文件 (这是 IPK 的灵魂)
-          cat <<EOF > ipk/CONTROL/control
-          Package: luci-app-ech-workers
-          Version: 1.2.0-$(date +%Y%m%d)
-          Architecture: all
-          Maintainer: Gemini-K3-Build
-          Depends: curl, ca-certificates
-          Description: Fast build IPK for K3 ARMv7
+          # 4. 写入基本配置文件 (重要：解决菜单不显示的关键)
+          cat <<EOF > ipk/etc/config/ech-workers
+          config ech-workers 'config'
+              option enabled '0'
+              option server_addr '你的Worker域名.workers.dev'
+              option listen_addr '0.0.0.0:30001'
+              option udp_mode '1'
           EOF
 
-          # 5. 伪造 IPK (其实就是连续压缩)
+          # 5. 写入菜单权限文件 (LuCI 界面必须)
+          cat <<EOF > ipk/usr/share/luci/menu.d/luci-app-ech-workers.json
+          {
+              "admin/services/ech-workers": {
+                  "title": "ECH Workers Proxy",
+                  "order": 50,
+                  "action": { "type": "model", "path": "ech-workers" }
+              }
+          }
+          EOF
+
+          # 6. 复制 Lua 界面和启动脚本 (增加容错路径)
+          cp luci/root/etc/init.d/ech-workers ipk/etc/init.d/ 2>/dev/null || cp root/etc/init.d/ech-workers ipk/etc/init.d/
+          cp luci/root/usr/lib/lua/luci/model/cbi/ech-workers.lua ipk/usr/lib/lua/luci/model/cbi/ 2>/dev/null || cp root/usr/lib/lua/luci/model/cbi/ech-workers.lua ipk/usr/lib/lua/luci/model/cbi/
+          chmod +x ipk/etc/init.d/ech-workers
+
+          # 7. 封装 CONTROL
+          cat <<EOF > ipk/CONTROL/control
+          Package: luci-app-ech-workers
+          Version: 1.2.5
+          Architecture: all
+          Maintainer: Gemini-K3
+          Depends: curl, ca-certificates
+          Description: ECH-Workers for K3 with Auto-Config
+          EOF
+
+          # 8. 执行打包
           cd ipk
           tar -czf ../control.tar.gz ./CONTROL
           tar -czf ../data.tar.gz --exclude=CONTROL .
@@ -57,14 +72,13 @@ jobs:
           echo "2.0" > debian-binary
           ar r luci-app-ech-workers_k3.ipk debian-binary control.tar.gz data.tar.gz
           
-          mkdir -p deploy
-          mv luci-app-ech-workers_k3.ipk deploy/
+          mkdir -p deploy && mv luci-app-ech-workers_k3.ipk deploy/
 
       - name: Create Release and Upload
         uses: softprops/action-gh-release@v1
         with:
           tag_name: v${{ github.run_number }}
-          name: K3-Fast-Release-v${{ github.run_number }}
+          name: K3-AutoConfig-Release-v${{ github.run_number }}
           files: deploy/*.ipk
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
