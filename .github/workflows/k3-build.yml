@@ -1,28 +1,40 @@
 name: K3-Go-IPK-Build
+
+# 仅保留手动触发
 on:
   workflow_dispatch:
+
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
       - name: Set up Go
         uses: actions/setup-go@v4
         with:
           go-version: '1.21'
+          cache: true
+
       - name: Build Binary (ARMv7 Static)
         run: |
-          CGO_ENABLED=0 GOOS=linux GOARCH=arm GOARM=7 go build -trimpath -ldflags="-s -w" -o ech-workers ech-workers.go
+          # 静态编译 Go 源码
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm GOARM=7 \
+          go build -trimpath -ldflags="-s -w" -o ech-workers ech-workers.go
+          
+          # 准备 Luci 打包结构
           mkdir -p luci/root/usr/bin/
           mv ech-workers luci/root/usr/bin/
           chmod +x luci/root/usr/bin/ech-workers
+
       - name: Build IPK via SDK
         uses: immortalwrt/gh-action-sdk@master
         with:
           architecture: arm_cortex-a9_vfpv3-d16
           pkgdir: luci
-      - name: Upload
+
+      - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
           name: k3-ipk-package
