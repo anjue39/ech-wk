@@ -1,0 +1,70 @@
+name: K3-Fast-IPK-Build
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout Source
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: '1.21'
+          cache: true
+
+      - name: Build Binary and Pack IPK
+        run: |
+          # 1. 编译 Go 二进制 (32位 ARMv7)
+          [ -f "go.mod" ] || go mod init ech-workers
+          go mod tidy
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm GOARM=7 \
+          go build -trimpath -ldflags="-s -w" -o ech-workers ech-workers.go
+
+          # 2. 创建目录结构
+          mkdir -p ipk/usr/bin
+          mkdir -p ipk/etc/init.d
+          mkdir -p ipk/usr/lib/lua/luci/model/cbi
+          mkdir -p ipk/CONTROL
+
+          # 3. 复制文件到对应位置
+          cp ech-workers ipk/usr/bin/
+          chmod +x ipk/usr/bin/ech-workers
+          cp luci/root/etc/init.d/ech-workers ipk/etc/init.d/
+          chmod +x ipk/etc/init.d/ech-workers
+          cp luci/root/usr/lib/lua/luci/model/cbi/ech-workers.lua ipk/usr/lib/lua/luci/model/cbi/
+
+          # 4. 手写 CONTROL 文件 (这是 IPK 的灵魂)
+          cat <<EOF > ipk/CONTROL/control
+          Package: luci-app-ech-workers
+          Version: 1.2.0-$(date +%Y%m%d)
+          Architecture: all
+          Maintainer: Gemini-K3-Build
+          Depends: curl, ca-certificates
+          Description: Fast build IPK for K3 ARMv7
+          EOF
+
+          # 5. 伪造 IPK (其实就是连续压缩)
+          cd ipk
+          tar -czf ../control.tar.gz ./CONTROL
+          tar -czf ../data.tar.gz --exclude=CONTROL .
+          cd ..
+          echo "2.0" > debian-binary
+          ar r luci-app-ech-workers_k3.ipk debian-binary control.tar.gz data.tar.gz
+          
+          mkdir -p deploy
+          mv luci-app-ech-workers_k3.ipk deploy/
+
+      - name: Create Release and Upload
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: v${{ github.run_number }}
+          name: K3-Fast-Release-v${{ github.run_number }}
+          files: deploy/*.ipk
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
