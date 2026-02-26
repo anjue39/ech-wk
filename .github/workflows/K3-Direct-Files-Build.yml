@@ -1,0 +1,61 @@
+name: K3-Direct-Files-Build
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build
+        run: |
+          # 1. 编译核心
+          [ -f "go.mod" ] || go mod init ech-workers
+          go mod tidy
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm GOARM=7 go build -trimpath -ldflags="-s -w" -o ech-workers ech-workers.go
+
+          # 2. 按照路由器目录结构摆放文件
+          mkdir -p output/usr/bin output/etc/init.d output/etc/config \
+                   output/usr/lib/lua/luci/model/cbi output/usr/lib/lua/luci/controller
+
+          cp ech-workers output/usr/bin/
+          
+          # 写入菜单入口
+          cat <<EOF > output/usr/lib/lua/luci/controller/ech-workers.lua
+          module("luci.controller.ech-workers", package.seeall)
+          function index()
+              entry({"admin", "services", "ech-workers"}, cbi("ech-workers"), _("ECH Workers Proxy"), 50).dependent = true
+          end
+          EOF
+
+          # 写入界面逻辑
+          cat <<EOF > output/usr/lib/lua/luci/model/cbi/ech-workers.lua
+          local m, s, o
+          m = Map("ech-workers", "ECH Workers Proxy", "K3 暴力直装版")
+          s = m:section(TypedSection, "config", "设置")
+          s.anonymous = true
+          o = s:option(Flag, "enabled", "启用")
+          o = s:option(Value, "server_addr", "Worker 域名")
+          o = s:option(Value, "listen_addr", "监听地址")
+          o.default = "0.0.0.0:30001"
+          return m
+          EOF
+
+          # 写入默认配置
+          echo "config ech-workers 'config'" > output/etc/config/ech-workers
+
+          # 3. 打成普通的压缩包
+          cd output && tar -czf ../k3-files.tar.gz . && cd ..
+
+      - name: Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: v${{ github.run_number }}
+          files: k3-files.tar.gz
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
