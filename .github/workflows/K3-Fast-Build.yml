@@ -1,4 +1,4 @@
-name: K3-Standard-IPK-Final-Rebuild
+name: K3-IPK-Ultra-Compatible
 
 on:
   workflow_dispatch:
@@ -14,26 +14,20 @@ jobs:
 
       - name: Build Binary
         run: |
-          # 1. 编译核心
           [ -f "go.mod" ] || go mod init ech-workers
           go mod tidy
           CGO_ENABLED=0 GOOS=linux GOARCH=arm GOARM=7 \
           go build -trimpath -ldflags="-s -w" -o ech-workers ech-workers.go
 
-      - name: Prepare Package
+      - name: Prepare Files
         run: |
-          # 2. 建立临时打包目录
-          mkdir -p ipk/CONTROL
-          mkdir -p ipk/usr/bin
-          mkdir -p ipk/etc/init.d
-          mkdir -p ipk/etc/config
-          mkdir -p ipk/usr/lib/lua/luci/controller
-          mkdir -p ipk/usr/lib/lua/luci/model/cbi
+          # 建立极其标准的结构
+          mkdir -p ipk/CONTROL ipk/usr/bin ipk/etc/init.d ipk/etc/config \
+                   ipk/usr/lib/lua/luci/model/cbi ipk/usr/lib/lua/luci/controller
 
-          # 3. 填充文件
           cp ech-workers ipk/usr/bin/
           
-          # 菜单入口 (Controller)
+          # 菜单 (Controller)
           cat <<EOF > ipk/usr/lib/lua/luci/controller/ech-workers.lua
           module("luci.controller.ech-workers", package.seeall)
           function index()
@@ -41,10 +35,10 @@ jobs:
           end
           EOF
 
-          # 界面逻辑 (Model)
+          # 界面 (Model)
           cat <<EOF > ipk/usr/lib/lua/luci/model/cbi/ech-workers.lua
           local m, s, o
-          m = Map("ech-workers", "ECH Workers Proxy", "K3 ARMv7 标准安装版")
+          m = Map("ech-workers", "ECH Workers Proxy", "K3 ARMv7 标准版")
           s = m:section(TypedSection, "config", "设置")
           s.anonymous = true
           o = s:option(Flag, "enabled", "启用")
@@ -54,10 +48,8 @@ jobs:
           return m
           EOF
 
-          # 基础配置
+          # 配置与脚本
           echo "config ech-workers 'config'" > ipk/etc/config/ech-workers
-
-          # 启动脚本
           cat <<EOF > ipk/etc/init.d/ech-workers
           #!/bin/sh /etc/rc.common
           START=99
@@ -76,30 +68,25 @@ jobs:
           EOF
           chmod 755 ipk/etc/init.d/ech-workers ipk/usr/bin/ech-workers
 
-          # 4. 关键：编写极其标准的 CONTROL 文件
-          # 删掉了所有复杂的 Depends，只保留最基础的信息
+          # 4. 【核心点】CONTROL 文件采用 all 架构
           cat <<EOF > ipk/CONTROL/control
           Package: luci-app-ech-workers
-          Version: 2.0.0
-          Architecture: arm_cortex-a9_vfpv3-d16
+          Version: 2.1.0
+          Architecture: all
           Maintainer: Gemini
           Description: ECH Proxy for K3
           EOF
 
-      - name: Standard IPK Packing
+      - name: Packing
         run: |
-          # 5. 按照标准 IPK 顺序打包
           cd ipk
-          # 打包数据层
           tar -czf ../data.tar.gz --exclude=CONTROL .
-          # 打包配置层
           cd CONTROL
           tar -czf ../../control.tar.gz .
           cd ../..
-          # 打包外壳
           echo "2.0" > debian-binary
-          # 使用通用的 tar 打包，不再使用 ar
-          tar -cvzf luci-app-ech-workers_k3.ipk debian-binary data.tar.gz control.tar.gz
+          # 使用最原始的 tar 格式打包 IPK
+          tar -czf luci-app-ech-workers_k3.ipk debian-binary data.tar.gz control.tar.gz
           mkdir -p deploy && mv luci-app-ech-workers_k3.ipk deploy/
 
       - name: Release
