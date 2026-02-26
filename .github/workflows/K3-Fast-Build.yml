@@ -1,4 +1,4 @@
-name: K3-IPK-Final-Force-Menu
+name: K3-IPK-Final-Compatible
 
 on:
   workflow_dispatch:
@@ -12,26 +12,31 @@ jobs:
       - name: Checkout Source
         uses: actions/checkout@v4
 
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: '1.21'
+          cache: true
+
       - name: Build Binary and Pack IPK
         run: |
-          # 1. 编译核心 (ARMv7 静态)
+          # 1. 编译核心程序 (针对 K3 的 ARMv7 架构)
           [ -f "go.mod" ] || go mod init ech-workers
           go mod tidy
           CGO_ENABLED=0 GOOS=linux GOARCH=arm GOARM=7 \
           go build -trimpath -ldflags="-s -w" -o ech-workers ech-workers.go
 
-          # 2. 创建目录结构 (覆盖所有可能的 LuCI 版本路径)
+          # 2. 准备打包目录结构
           mkdir -p ipk/usr/bin ipk/etc/init.d ipk/etc/config \
                    ipk/usr/lib/lua/luci/model/cbi \
                    ipk/usr/lib/lua/luci/controller \
                    ipk/usr/share/luci/menu.d ipk/CONTROL
 
-          # 3. 核心程序
+          # 3. 核心程序与执行权限
           cp ech-workers ipk/usr/bin/
           chmod +x ipk/usr/bin/ech-workers
 
-          # 4. 【关键】写入菜单入口 (Controller)
-          # 这是解决“找不到菜单”的终极手段
+          # 4. 写入菜单控制器 (兼容老固件)
           cat <<EOF > ipk/usr/lib/lua/luci/controller/ech-workers.lua
           module("luci.controller.ech-workers", package.seeall)
           function index()
@@ -40,15 +45,15 @@ jobs:
           end
           EOF
 
-          # 5. 【关键】写入界面模型 (Model) - 修复了 return m 缺失问题
+          # 5. 写入界面模型 (修正版)
           cat <<EOF > ipk/usr/lib/lua/luci/model/cbi/ech-workers.lua
           local m, s, o
           m = Map("ech-workers", "ECH Workers Proxy", "K3 ARMv7 现场编译版")
-          s = m:section(TypedSection, "config", "基本设置")
+          s = m:section(TypedSection, "config", "设置")
           s.anonymous = true
           o = s:option(Flag, "enabled", "启用")
           o = s:option(Value, "server_addr", "Worker 域名")
-          o = s:option(Value, "listen_addr", "本地监听地址")
+          o = s:option(Value, "listen_addr", "监听地址")
           o.default = "0.0.0.0:30001"
           return m
           EOF
@@ -61,7 +66,7 @@ jobs:
               option listen_addr '0.0.0.0:30001'
           EOF
 
-          # 7. 启动脚本 (支持 Procd 守护进程)
+          # 7. 启动脚本
           cat <<EOF > ipk/etc/init.d/ech-workers
           #!/bin/sh /etc/rc.common
           START=99
@@ -81,7 +86,7 @@ jobs:
           EOF
           chmod +x ipk/etc/init.d/ech-workers
 
-          # 8. 权限 JSON (针对新版 LuCI)
+          # 8. 权限文件 (兼容新固件)
           cat <<EOF > ipk/usr/share/luci/menu.d/luci-app-ech-workers.json
           {
               "admin/services/ech-workers": {
@@ -92,28 +97,31 @@ jobs:
           }
           EOF
 
-          # 9. 打包成 IPK
+          # 9. 封装 CONTROL 文件
           cat <<EOF > ipk/CONTROL/control
           Package: luci-app-ech-workers
-          Version: 1.3.0
+          Version: 1.3.1
           Architecture: all
           Depends: curl, ca-certificates
-          Description: ECH-Workers for K3
+          Description: ECH-Workers for K3 (Fast-Build)
           EOF
-          
+
+          # 10. 【重点修复】生成兼容性最强的 TAR 格式 IPK
           cd ipk
           tar -czf ../control.tar.gz ./CONTROL
           tar -czf ../data.tar.gz --exclude=CONTROL .
           cd ..
           echo "2.0" > debian-binary
-          ar r luci-app-ech-workers_k3.ipk debian-binary control.tar.gz data.tar.gz
+          # 用 tar 代替 ar，解决 Malformed package 错误
+          tar -czf luci-app-ech-workers_k3.ipk debian-binary control.tar.gz data.tar.gz
+          
           mkdir -p deploy && mv luci-app-ech-workers_k3.ipk deploy/
 
-      - name: Create Release
+      - name: Release IPK
         uses: softprops/action-gh-release@v1
         with:
           tag_name: v${{ github.run_number }}
-          name: K3-Fast-Release-v${{ github.run_number }}
+          name: K3-ECH-Workers-v${{ github.run_number }}
           files: deploy/*.ipk
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
