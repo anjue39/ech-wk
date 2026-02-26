@@ -1,12 +1,13 @@
 name: K3-Go-IPK-Build
 
-# 仅保留手动触发
 on:
   workflow_dispatch:
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    permissions: # 必须开启写入权限，否则无法发布 Release
+      contents: write
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -19,11 +20,9 @@ jobs:
 
       - name: Build Binary (ARMv7 Static)
         run: |
-          # 静态编译 Go 源码
           CGO_ENABLED=0 GOOS=linux GOARCH=arm GOARM=7 \
           go build -trimpath -ldflags="-s -w" -o ech-workers ech-workers.go
           
-          # 准备 Luci 打包结构
           mkdir -p luci/root/usr/bin/
           mv ech-workers luci/root/usr/bin/
           chmod +x luci/root/usr/bin/ech-workers
@@ -34,8 +33,21 @@ jobs:
           architecture: arm_cortex-a9_vfpv3-d16
           pkgdir: luci
 
-      - name: Upload Artifact
-        uses: actions/upload-artifact@v4
+      - name: Collect IPK Files
+        run: |
+          mkdir -p deploy
+          find bin/targets/ -name "*.ipk" -exec cp {} deploy/ \;
+          echo "UPLOAD_PATH=deploy" >> $GITHUB_ENV
+
+      - name: Create Release and Upload
+        uses: softprops/action-gh-release@v1
         with:
-          name: k3-ipk-package
-          path: bin/targets/arm_cortex-a9_vfpv3-d16/packages/*.ipk
+          tag_name: v${{ github.run_number }}
+          name: K3 专用版 ECH-Workers v${{ github.run_number }}
+          body: |
+            这是专为斐讯 K3 (ARMv7) 编译的静态版 ECH-Workers。
+            - 核心已包含在 IPK 内，无需联网下载。
+            - 采用 GOARM=7 静态编译，解决运行报错问题。
+          files: deploy/*.ipk
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
