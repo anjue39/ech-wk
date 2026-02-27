@@ -1,4 +1,4 @@
-name: K3-ECH-Full-Feature-Final
+name: K3-ECH-Pro-Final-Success-Trace
 
 on:
   workflow_dispatch:
@@ -9,68 +9,78 @@ jobs:
     permissions:
       contents: write
     steps:
-      - name: Checkout Source
+      - name: Checkout
         uses: actions/checkout@v4
 
       - name: Build Binary
         run: |
-          # 1. 编译核心 (ARMv7)
           [ -f "go.mod" ] || go mod init ech-workers
           go mod tidy
           CGO_ENABLED=0 GOOS=linux GOARCH=arm GOARM=7 \
           go build -trimpath -ldflags="-s -w" -o ech-workers ech-workers.go
 
-      - name: Pack IPK
+      - name: Prepare Files
         run: |
-          # 2. 建立目录
+          # 建立目录结构 (沿用 v2.1.0 成功路径)
           mkdir -p ipk/CONTROL ipk/usr/bin ipk/etc/init.d ipk/etc/config \
                    ipk/usr/lib/lua/luci/model/cbi ipk/usr/lib/lua/luci/controller
 
-          # 3. 放入二进制
-          [ -f "ech-workers" ] && cp ech-workers ipk/usr/bin/ || echo "Binary not found!"
-
-          # 4. 写入菜单入口 (Controller)
+          cp ech-workers ipk/usr/bin/
+          
+          # 1. 菜单入口 (Controller)
           cat <<EOF > ipk/usr/lib/lua/luci/controller/ech-workers.lua
           module("luci.controller.ech-workers", package.seeall)
           function index()
+              if not nixio.fs.access("/etc/config/ech-workers") then return end
               entry({"admin", "services", "ech-workers"}, cbi("ech-workers"), _("ECH Workers Proxy"), 50).dependent = true
           end
           EOF
 
-          # 5. 写入全功能界面模型 (CBI) - 严格对照你的⚙️表格
+          # 2. 满配界面逻辑 (Model) - 严格对照你提供的⚙️参数表格
           cat <<EOF > ipk/usr/lib/lua/luci/model/cbi/ech-workers.lua
           local m, s, o
+          local sys = require "luci.sys"
+
           m = Map("ech-workers", "ECH Workers Proxy", "基于 Cloudflare Workers 的 ECH 代理服务")
 
-          s = m:section(TypedSection, "config", "基本设置")
+          -- 实时状态显示
+          s = m:section(TypedSection, "config", "服务状态")
           s.anonymous = true
+          local is_running = sys.call("pgrep -f /usr/bin/ech-workers >/dev/null") == 0
+          if is_running then
+              s.description = "<font color='green'><b>● 运行中</b></font>"
+          else
+              s.description = "<font color='red'><b>○ 未运行</b></font>"
+          end
+
+          -- 基本设置
+          s = m:section(NamedSection, "config", "ech-workers", "基本设置")
+          s.addremove = false
 
           o = s:option(Flag, "enabled", "启用", "开启/关闭服务")
           o.rmempty = false
 
-          o = s:option(Value, "server_addr", "服务器地址", "Workers 服务端地址，示例：your-worker.workers.dev:443")
-          o.rmempty = false
+          o = s:option(Value, "server_addr", "服务器地址", "Workers 服务端地址 (域名:端口)")
+          o.placeholder = "your-worker.workers.dev:443"
 
-          o = s:option(Value, "listen_addr", "监听地址", "本地代理监听端口，默认 0.0.0.0:30001")
+          o = s:option(Value, "listen_addr", "监听地址", "本地代理监听地址")
           o.default = "0.0.0.0:30001"
 
           o = s:option(Value, "token", "身份令牌", "服务端验证密钥 (可选)")
           o.password = true
 
           -- 高级设置
-          s = m:section(TypedSection, "config", "高级设置")
-          s.anonymous = true
-
-          o = s:option(Value, "up_address", "优选 IP/域名", "Cloudflare CDN 优选地址，默认 cf.090227.xyz")
+          s = m:section(NamedSection, "config", "ech-workers", "高级设置")
+          
+          o = s:option(Value, "up_address", "优选 IP/域名", "Cloudflare 优选地址")
           o.default = "cf.090227.xyz"
 
-          o = s:option(Value, "doh_url", "DoH 服务器", "DNS over HTTPS 服务器地址")
+          o = s:option(Value, "doh_url", "DoH 服务器")
           o.default = "dns.alidns.com/dns-query"
 
-          o = s:option(Value, "ech_host", "ECH 域名", "用于获取 ECH 配置，默认 cloudflare-ech.com")
+          o = s:option(Value, "ech_host", "ECH 域名")
           o.default = "cloudflare-ech.com"
 
-          -- 分流模式
           o = s:option(ListValue, "mode", "分流模式")
           o:value("global", "全局代理")
           o:value("bypass_china", "跳过中国大陆 (推荐)")
@@ -80,65 +90,66 @@ jobs:
           return m
           EOF
 
-          # 6. 写入全功能初始化配置
+          # 3. 初始化配置 (解决“尚无任何配置”问题)
           cat <<EOF > ipk/etc/config/ech-workers
           config ech-workers 'config'
               option enabled '0'
               option server_addr ''
               option listen_addr '0.0.0.0:30001'
-              option token ''
               option up_address 'cf.090227.xyz'
               option doh_url 'dns.alidns.com/dns-query'
               option ech_host 'cloudflare-ech.com'
               option mode 'bypass_china'
           EOF
 
-          # 7. 写入启动脚本 (赋予权限)
+          # 4. 增强版启动脚本 (支持 stop/restart 和进程管理)
           cat <<EOF > ipk/etc/init.d/ech-workers
           #!/bin/sh /etc/rc.common
           START=99
           USE_PROCD=1
+
           start_service() {
               config_load ech-workers
               local enabled server_addr listen_addr token up_address
               config_get_bool enabled config enabled 0
               [ "\$enabled" -eq 1 ] || return
+
               config_get server_addr config server_addr
               config_get listen_addr config listen_addr "0.0.0.0:30001"
               config_get token config token
               config_get up_address config up_address "cf.090227.xyz"
-              
+
               procd_open_instance
+              # 这里的参数根据你的 Go 源码 flag 调整
               procd_set_param command /usr/bin/ech-workers -w "\$server_addr" -l "\$listen_addr" -t "\$token" -up "\$up_address"
               procd_set_param respawn
               procd_close_instance
           }
+
+          stop_service() {
+              killall ech-workers
+          }
           EOF
           chmod 755 ipk/etc/init.d/ech-workers ipk/usr/bin/ech-workers
 
-          # 8. 打包
-          cat <<EOF > ipk/CONTROL/control
-          Package: luci-app-ech-workers
-          Version: 2.3.0
-          Architecture: all
-          Maintainer: Gemini
-          Description: ECH Workers Proxy Full Featured for K3
-          EOF
-          
+      - name: Packing (Success-Trace Logic)
+        run: |
+          # 采用 v2.1.0 验证成功的 tar 缝合打包方式
+          mkdir -p deploy
           cd ipk
           tar -czf ../data.tar.gz --exclude=CONTROL .
-          cd CONTROL && tar -czf ../../control.tar.gz . && cd ../..
+          cd CONTROL
+          tar -czf ../../control.tar.gz .
+          cd ../..
           echo "2.0" > debian-binary
-          tar -czf luci-app-ech-workers_k3.ipk debian-binary data.tar.gz control.tar.gz
-          
-          # 确保 deploy 目录存在并移动
-          mkdir -p ../deploy && mv luci-app-ech-workers_k3.ipk ../deploy/
+          # 生成包名增加 pro 标识
+          tar -czf luci-app-ech-workers_pro_k3.ipk debian-binary data.tar.gz control.tar.gz
+          mv luci-app-ech-workers_pro_k3.ipk deploy/
 
-      - name: Release IPK
+      - name: Release
         uses: softprops/action-gh-release@v1
         with:
-          tag_name: v${{ github.run_number }}
-          name: K3-Full-Feature-v${{ github.run_number }}
+          tag_name: pro-v${{ github.run_number }}
           files: deploy/*.ipk
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
