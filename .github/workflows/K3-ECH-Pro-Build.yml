@@ -1,4 +1,4 @@
-name: K3-ECH-Pro-v4-Final
+name: K3-ECH-Pro-Final-Fixed
 
 on:
   workflow_dispatch:
@@ -14,21 +14,31 @@ jobs:
 
       - name: Build Binary
         run: |
+          # 1. 编译核心 (针对 K3 ARMv7)
           [ -f "go.mod" ] || go mod init ech-workers
           go mod tidy
-          CGO_ENABLED=0 GOOS=linux GOARCH=arm GOARCH=arm GOARM=7 \
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm GOARM=7 \
           go build -trimpath -ldflags="-s -w" -o ech-workers ech-workers.go
+          # 检查二进制是否生成
+          ls -l ech-workers
 
       - name: Pack IPK
         run: |
-          # 建立标准目录
-          mkdir -p ipk/CONTROL ipk/usr/bin ipk/etc/init.d ipk/etc/config \
-                   ipk/usr/lib/lua/luci/model/cbi ipk/usr/lib/lua/luci/controller
+          # 2. 创建绝对路径结构的打包目录
+          export IPK_DIR=$GITHUB_WORKSPACE/ipk_build
+          mkdir -p $IPK_DIR/CONTROL \
+                   $IPK_DIR/usr/bin \
+                   $IPK_DIR/etc/init.d \
+                   $IPK_DIR/etc/config \
+                   $IPK_DIR/usr/lib/lua/luci/model/cbi \
+                   $IPK_DIR/usr/lib/lua/luci/controller
 
-          cp ech-workers ipk/usr/bin/
+          # 3. 复制核心程序
+          cp ech-workers $IPK_DIR/usr/bin/
+          chmod +x $IPK_DIR/usr/bin/ech-workers
 
-          # 1. Controller: 确保 cbi("ech-workers") 对应 model/cbi/ 下的文件
-          cat <<EOF > ipk/usr/lib/lua/luci/controller/ech-workers.lua
+          # 4. 写入菜单控制器 (Controller)
+          cat <<EOF > $IPK_DIR/usr/lib/lua/luci/controller/ech-workers.lua
           module("luci.controller.ech-workers", package.seeall)
           function index()
               if not nixio.fs.access("/etc/config/ech-workers") then return end
@@ -44,28 +54,26 @@ jobs:
           end
           EOF
 
-          # 2. Model: 必须叫 ech-workers.lua (对应上面的 cbi 入口)
-          cat <<EOF > ipk/usr/lib/lua/luci/model/cbi/ech-workers.lua
+          # 5. 写入界面模型 (Model)
+          cat <<EOF > $IPK_DIR/usr/lib/lua/luci/model/cbi/ech-workers.lua
           local m, s, o
           local sys = require "luci.sys"
 
           m = Map("ech-workers", "ECH Workers Proxy", "基于 Cloudflare Workers 的 ECH 代理")
 
-          -- 状态显示
           s = m:section(TypedSection, "config")
           s.anonymous = true
           s.description = "服务状态: " .. (sys.call("pgrep -f /usr/bin/ech-workers >/dev/null") == 0 
               and "<font color='green'><b>运行中</b></font>" 
               or "<font color='red'><b>未运行</b></font>")
 
-          -- 基本设置
           s = m:section(NamedSection, "config", "ech-workers", "基本设置")
           s.addremove = false
 
-          o = s:option(Flag, "enabled", "启用", "开启或关闭代理服务")
+          o = s:option(Flag, "enabled", "启用")
           o.rmempty = false
 
-          o = s:option(Value, "server_addr", "服务器地址", "Worker 域名:端口")
+          o = s:option(Value, "server_addr", "服务器地址", "示例: your.workers.dev:443")
           o.placeholder = "your.workers.dev:443"
 
           o = s:option(Value, "listen_addr", "监听地址")
@@ -74,7 +82,6 @@ jobs:
           o = s:option(Value, "token", "身份令牌", "服务端验证密钥 (可选)")
           o.password = true
 
-          -- 高级设置
           s = m:section(NamedSection, "config", "ech-workers", "高级设置")
           
           o = s:option(Value, "up_address", "优选 IP/域名")
@@ -95,8 +102,8 @@ jobs:
           return m
           EOF
 
-          # 3. 配置文件
-          cat <<EOF > ipk/etc/config/ech-workers
+          # 6. 初始化配置
+          cat <<EOF > $IPK_DIR/etc/config/ech-workers
           config ech-workers 'config'
               option enabled '0'
               option server_addr ''
@@ -107,8 +114,8 @@ jobs:
               option mode 'bypass_china'
           EOF
 
-          # 4. 启动脚本
-          cat <<EOF > ipk/etc/init.d/ech-workers
+          # 7. 启动脚本
+          cat <<EOF > $IPK_DIR/etc/init.d/ech-workers
           #!/bin/sh /etc/rc.common
           START=99
           USE_PROCD=1
@@ -133,28 +140,40 @@ jobs:
               procd_set_param respawn
               procd_close_instance
           }
-          EOF
-          chmod 755 ipk/etc/init.d/ech-workers ipk/usr/bin/ech-workers
 
-          # 5. 打包
-          cat <<EOF > ipk/CONTROL/control
-          Package: luci-app-ech-workers
-          Version: 4.0.0
-          Architecture: all
-          Description: Final Pro Version for K3
+          stop_service() {
+              killall ech-workers
+          }
           EOF
-          
-          cd ipk
+          chmod 755 $IPK_DIR/etc/init.d/ech-workers
+
+          # 8. 打包 CONTROL
+          cat <<EOF > $IPK_DIR/CONTROL/control
+          Package: luci-app-ech-workers
+          Version: 4.1.0
+          Architecture: all
+          Description: Pro Version for K3 (Absolute Path Fixed)
+          EOF
+
+          # 9. 最终封装
+          cd $IPK_DIR
           tar -czf ../data.tar.gz --exclude=CONTROL .
-          cd CONTROL && tar -czf ../../control.tar.gz . && cd ../..
+          cd CONTROL
+          tar -czf ../../control.tar.gz .
+          cd ../..
           echo "2.0" > debian-binary
-          tar -czf luci-app-ech-workers_v4_k3.ipk debian-binary data.tar.gz control.tar.gz
-          mkdir -p ../deploy && mv luci-app-ech-workers_v4_k3.ipk ../deploy/
+          tar -czf luci-app-ech-workers_v4.1_k3.ipk debian-binary data.tar.gz control.tar.gz
+          
+          # 创建输出目录并移动文件
+          mkdir -p $GITHUB_WORKSPACE/artifact
+          mv luci-app-ech-workers_v4.1_k3.ipk $GITHUB_WORKSPACE/artifact/
+          ls -l $GITHUB_WORKSPACE/artifact/
 
       - name: Release IPK
         uses: softprops/action-gh-release@v1
         with:
           tag_name: v${{ github.run_number }}
-          files: deploy/*.ipk
+          name: K3-Pro-v4.1-Fixed
+          files: artifact/*.ipk
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
