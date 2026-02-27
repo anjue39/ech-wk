@@ -1,0 +1,41 @@
+name: K3-ECH-Core-Only-Build
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout Source
+        uses: actions/checkout@v4
+
+      - name: Build K3 Compatible Binary
+        run: |
+          # 1. 克隆 byJoey 的核心源码
+          git clone https://github.com/byJoey/ech-wk.git core-src
+          cd core-src
+          
+          # 2. 整理依赖
+          go mod tidy
+          
+          # 3. 核心编译参数说明：
+          # CGO_ENABLED=0: 禁用 CGO，实现全静态链接，避免依赖 K3 固件中缺失的库
+          # GOOS=linux / GOARCH=arm: 目标系统为 Linux ARM
+          # GOARM=5: 关键！K3 的 BCM4709 不支持部分 ARMv7 指令，GOARM=5 兼容性最强
+          # -ldflags "-s -w": 压缩体积，移除调试信息
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm GOARM=5 \
+          go build -trimpath -ldflags="-s -w" -o ../ech-workers-k3 .
+          
+          cd ..
+
+      - name: Upload to Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: core-v${{ github.run_number }}
+          name: K3-Core-Only-v${{ github.run_number }}
+          files: ech-workers-k3
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
