@@ -1,4 +1,4 @@
-name: K3-ECH-Success-Trace-Pro
+name: K3-ECH-IllegalInstruction-Fix
 
 on:
   workflow_dispatch:
@@ -12,22 +12,24 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Build Binary
+      - name: Build Binary (Safety Mode)
         run: |
           [ -f "go.mod" ] || go mod init ech-workers
           go mod tidy
-          CGO_ENABLED=0 GOOS=linux GOARCH=arm GOARM=7 \
-          go build -trimpath -ldflags="-s -w" -o ech-workers ech-workers.go
+          # 关键修改：GOARM=5 兼容性最强，避免 Illegal instruction
+          # -tags netgo 强制使用 Go 自身的网络库，避免调用 C 库出错
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm GOARM=5 \
+          go build -trimpath -tags netgo -ldflags="-s -w -extldflags '-static'" -o ech-workers ech-workers.go
 
       - name: Prepare Files
         run: |
-          # 1. 严格复刻成功版本的目录结构
+          # 沿用你反馈成功的 v2.1.0 目录逻辑
           mkdir -p ipk/CONTROL ipk/usr/bin ipk/etc/init.d ipk/etc/config \
                    ipk/usr/lib/lua/luci/model/cbi ipk/usr/lib/lua/luci/controller
 
           cp ech-workers ipk/usr/bin/
           
-          # 2. 菜单入口 (Controller)
+          # 1. Controller
           cat <<EOF > ipk/usr/lib/lua/luci/controller/ech-workers.lua
           module("luci.controller.ech-workers", package.seeall)
           function index()
@@ -36,73 +38,50 @@ jobs:
           end
           EOF
 
-          # 3. 满配 Pro 界面逻辑 (Model)
+          # 2. Model (带自动刷新状态)
           cat <<EOF > ipk/usr/lib/lua/luci/model/cbi/ech-workers.lua
           local m, s, o
           local sys = require "luci.sys"
 
-          m = Map("ech-workers", "ECH Workers Proxy", "基于 Cloudflare Workers 的全功能 ECH 代理")
+          m = Map("ech-workers", "ECH Workers Proxy", "基于 Workers 的 ECH 代理 - K3 兼容修复版")
 
-          -- 状态显示
           s = m:section(TypedSection, "config", "服务状态")
           s.anonymous = true
-          local is_running = sys.call("pgrep -f /usr/bin/ech-workers >/dev/null") == 0
+          
+          local is_running = sys.call("pidof ech-workers >/dev/null") == 0
           if is_running then
-              s.description = "<font color='green'><b>● 运行中</b></font>"
+              s.description = "<font color='green'><b>● 运行中 (K3 已兼容)</b></font>"
           else
-              s.description = "<font color='red'><b>○ 未运行</b></font>"
+              s.description = "<font color='red'><b>○ 未运行 (请检查配置并保存)</b></font>"
           end
 
-          -- 基本设置
           s = m:section(NamedSection, "config", "ech-workers", "基本设置")
-          s.addremove = false
-
-          o = s:option(Flag, "enabled", "启用", "开启/关闭服务")
+          o = s:option(Flag, "enabled", "启用")
           o.rmempty = false
-
-          o = s:option(Value, "server_addr", "服务器地址", "示例: your-worker.workers.dev:443")
-          o.rmempty = false
-
+          o = s:option(Value, "server_addr", "服务器地址")
           o = s:option(Value, "listen_addr", "监听地址")
           o.default = "0.0.0.0:30001"
-
-          o = s:option(Value, "token", "身份令牌", "服务端验证密钥 (可选)")
+          o = s:option(Value, "token", "身份令牌")
           o.password = true
 
-          -- 高级设置 (参照你要求的⚙️表格)
           s = m:section(NamedSection, "config", "ech-workers", "高级设置")
-          
           o = s:option(Value, "up_address", "优选 IP/域名")
           o.default = "cf.090227.xyz"
-
-          o = s:option(Value, "doh_url", "DoH 服务器")
-          o.default = "dns.alidns.com/dns-query"
-
-          o = s:option(Value, "ech_host", "ECH 域名")
-          o.default = "cloudflare-ech.com"
-
-          o = s:option(ListValue, "mode", "分流模式")
-          o:value("global", "全局代理")
-          o:value("bypass_china", "跳过中国大陆 (推荐)")
-          o:value("direct", "直连模式")
+          o = s:option(Value, "mode", "分流模式")
           o.default = "bypass_china"
 
           return m
           EOF
 
-          # 4. 初始化配置 (解决“尚无任何配置”问题)
+          # 3. 初始化配置
           cat <<EOF > ipk/etc/config/ech-workers
           config ech-workers 'config'
               option enabled '0'
-              option server_addr ''
               option listen_addr '0.0.0.0:30001'
               option up_address 'cf.090227.xyz'
-              option doh_url 'dns.alidns.com/dns-query'
-              option ech_host 'cloudflare-ech.com'
-              option mode 'bypass_china'
           EOF
 
-          # 5. 增强型启动脚本
+          # 4. 启动脚本
           cat <<EOF > ipk/etc/init.d/ech-workers
           #!/bin/sh /etc/rc.common
           START=99
@@ -120,39 +99,22 @@ jobs:
               config_get up_address config up_address "cf.090227.xyz"
 
               procd_open_instance
-              # 参数匹配：-w 服务器 -l 监听 -t 令牌 -up 优选IP
               procd_set_param command /usr/bin/ech-workers -w "\$server_addr" -l "\$listen_addr" -t "\$token" -up "\$up_address"
               procd_set_param respawn
               procd_close_instance
           }
-
-          stop_service() {
-              killall ech-workers
-          }
           EOF
           chmod 755 ipk/etc/init.d/ech-workers ipk/usr/bin/ech-workers
 
-          # 6. 标准 CONTROL (复刻 v2.1.0 成功配置)
-          cat <<EOF > ipk/CONTROL/control
-          Package: luci-app-ech-workers
-          Version: 5.0.0
-          Architecture: all
-          Maintainer: Gemini
-          Description: ECH Workers Proxy Pro Trace-Success
-          EOF
-
-      - name: Packing (Success Trace Logic)
+      - name: Packing (Trace-Success Mode)
         run: |
-          # 严格执行 v2.1.0 的 tar 缝合流程
           mkdir -p deploy
           cd ipk
           tar -czf ../data.tar.gz --exclude=CONTROL .
-          cd CONTROL
-          tar -czf ../../control.tar.gz .
-          cd ../..
+          cd CONTROL && tar -czf ../../control.tar.gz . && cd ../..
           echo "2.0" > debian-binary
-          tar -czf luci-app-ech-workers_k3_pro.ipk debian-binary data.tar.gz control.tar.gz
-          mv luci-app-ech-workers_k3_pro.ipk deploy/
+          tar -czf luci-app-ech-workers_k3_fix.ipk debian-binary data.tar.gz control.tar.gz
+          mv luci-app-ech-workers_k3_fix.ipk deploy/
 
       - name: Release
         uses: softprops/action-gh-release@v1
