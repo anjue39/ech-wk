@@ -1,4 +1,4 @@
-name: K3-ECH-Pro-Full-Fixed-v3.6
+name: K3-Perfect-Match-Build
 
 on:
   workflow_dispatch:
@@ -12,108 +12,92 @@ jobs:
       - name: Checkout Source
         uses: actions/checkout@v4
 
-      - name: Build Binary (Fix go.mod & Illegal Instruction)
+      - name: Build Binary (ARMv5 Compatibility)
         run: |
-          # 1. 克隆核心源码
-          git clone https://github.com/byJoey/ech-wk.git core-src
-          cd core-src
-          
-          # 2. 关键修复：手动初始化模块
-          if [ ! -f "go.mod" ]; then
-            go mod init ech-wk
-          fi
+          # 采用 ARMv5 编译，这是解决“跑不起来”的终极兼容方案
+          [ -f "go.mod" ] || go mod init ech-workers
           go mod tidy
-          
-          # 3. 针对 K3 (Cortex-A9) 编译：GOARM=5 解决非法指令
           CGO_ENABLED=0 GOOS=linux GOARCH=arm GOARM=5 \
-          go build -trimpath -ldflags="-s -w -extldflags '-static'" -o ../ech-workers .
-          cd ..
+          go build -trimpath -ldflags="-s -w" -o ech-workers ech-workers.go
 
-      - name: Prepare Package Files
+      - name: Pack IPK (Direct Adapt)
         run: |
-          mkdir -p ipk/CONTROL ipk/usr/bin ipk/etc/init.d ipk/etc/config \
-                   ipk/usr/lib/lua/luci/model/cbi ipk/usr/lib/lua/luci/controller
+          # 1. 建立目录
+          mkdir -p ipk/usr/bin ipk/etc/init.d ipk/etc/config \
+                   ipk/usr/lib/lua/luci/model/cbi \
+                   ipk/usr/lib/lua/luci/controller \
+                   ipk/CONTROL
 
-          cp ech-workers ipk/usr/bin/
-          chmod 755 ipk/usr/bin/ech-workers
+          # 2. 放入核心程序
+          cp ech-workers ipk/usr/bin/ && chmod +x ipk/usr/bin/ech-workers
 
-          # 1. Controller: 菜单与日志接口
+          # 3. 仿照 SunshineList 的逻辑生成文件 (确保 100% 匹配)
+          # 界面 Model
+          cat <<EOF > ipk/usr/lib/lua/luci/model/cbi/ech-workers.lua
+          local m, s, o
+          m = Map("ech-workers", "ECH Workers Proxy", "K3 ARMv7 (v5兼容编译)")
+          s = m:section(TypedSection, "config", "基本设置")
+          s.anonymous = true
+          o = s:option(Flag, "enabled", "启用")
+          o = s:option(Value, "server_addr", "Worker 域名")
+          o = s:option(Value, "listen_addr", "本地监听地址")
+          o.default = "0.0.0.0:30001"
+          return m
+          EOF
+
+          # 菜单 Controller
           cat <<EOF > ipk/usr/lib/lua/luci/controller/ech-workers.lua
           module("luci.controller.ech-workers", package.seeall)
           function index()
               entry({"admin", "services", "ech-workers"}, cbi("ech-workers"), _("ECH Workers Proxy"), 50).dependent = true
-              entry({"admin", "services", "ech-workers", "status"}, call("act_status")).leaf = true
-              entry({"admin", "services", "ech-workers", "log"}, call("get_log")).leaf = true
-          end
-
-          function act_status()
-              local sys = require "luci.sys"
-              local running = sys.call("pidof ech-workers >/dev/null") == 0
-              luci.http.prepare_content("application/json")
-              luci.http.write_json({ running = running })
-          end
-
-          function get_log()
-              local log = luci.util.exec("logread -e ech-workers | tail -n 50")
-              luci.http.prepare_content("text/plain")
-              luci.http.write(log or "暂无日志信息")
           end
           EOF
 
-          # 2. Model: 界面、控制按钮与实时日志
-          cat <<EOF > ipk/usr/lib/lua/luci/model/cbi/ech-workers.lua
-          local m, s, o
-          local sys = require "luci.sys"
-
-          m = Map("ech-workers", "ECH Workers Proxy", "基于 Cloudflare Workers 的 ECH 代理 (K3 Pro版)")
-
-          s = m:section(TypedSection, "config", "服务控制")
-          s.anonymous = true
-          local running = sys.call("pidof ech-workers >/dev/null") == 0
-          if running then
-              s.description = "<font color='green'><b>● 运行中</b></font>"
-          else
-              s.description = "<font color='red'><b>○ 未运行</b></font>"
-          end
-
-          s = m:section(NamedSection, "main", "config", "基本设置")
-          s.addremove = false
-          o = s:option(Flag, "enabled", "启用")
-          o = s:option(Value, "server_addr", "服务器地址")
-          o = s:option(Value, "listen_addr", "监听地址")
-          o.default = "0.0.0.0:12580"
-          o = s:option(Value, "token", "身份令牌")
-          o.password = true
-
-          s = m:section(NamedSection, "main", "config", "高级设置")
-          o = s:option(Value, "up_address", "优选 IP/域名")
-          o.default = "cf.090227.xyz"
-          o = s:option(ListValue, "mode", "分流模式")
-          o:value("global", "全局代理")
-          o:value("bypass_china", "跳过中国大陆")
-          o.default = "bypass_china"
-
-          s = m:section(TypedSection, "config", "实时日志")
-          s.anonymous = true
-          o = s:option(DummyValue, "_log")
-          o.rawhtml = true
-          o.value = [[<textarea id="log_content" readonly="readonly" style="width: 100%; height: 200px; font-family: monospace; background: #000; color: #0f0; border: none; padding: 10px; font-size: 12px;"></textarea>
-          <script type="text/javascript">
-              function update_log() {
-                  XHR.get(']] .. luci.dispatcher.build_url("admin", "services", "ech-workers", "log") .. [[', null, function(x, data) {
-                      var e = document.getElementById('log_content');
-                      if (e && data) { e.value = data; e.scrollTop = e.scrollHeight; }
-                  });
-              }
-              setInterval(update_log, 4000);
-              update_log();
-          </script>]]
-
-          return m
-          EOF
-
-          # 3. 初始化配置
+          # 4. 关键：对齐 SunshineList 所需的配置文件格式
           cat <<EOF > ipk/etc/config/ech-workers
-          config config 'main'
+          config config
               option enabled '0'
-              option listen_addr '0.0.0.
+              option server_addr ''
+              option listen_addr '0.0.0.0:30001'
+          EOF
+
+          # 5. 启动脚本 (兼容性处理)
+          cat <<EOF > ipk/etc/init.d/ech-workers
+          #!/bin/sh /etc/rc.common
+          START=99
+          USE_PROCD=1
+          start_service() {
+              config_load ech-workers
+              local enabled server_addr listen_addr
+              config_get_bool enabled config enabled 0
+              [ "\$enabled" -eq 1 ] || return 0
+              config_get server_addr config server_addr
+              config_get listen_addr config listen_addr "0.0.0.0:30001"
+              procd_open_instance
+              procd_set_param command /usr/bin/ech-workers -w "\$server_addr" -l "\$listen_addr"
+              procd_set_param respawn
+              procd_close_instance
+          }
+          EOF
+          chmod +x ipk/etc/init.d/ech-workers
+
+          # 6. 打包
+          cat <<EOF > ipk/CONTROL/control
+          Package: luci-app-ech-workers
+          Version: 1.7.0
+          Architecture: all
+          Depends: curl, ca-certificates
+          Description: K3 ECH-Workers based on SunshineList UI
+          EOF
+          
+          cd ipk && tar -czf ../control.tar.gz ./CONTROL && tar -czf ../data.tar.gz --exclude=CONTROL . && cd ..
+          echo "2.0" > debian-binary && ar r luci-app-ech-workers_k3.ipk debian-binary control.tar.gz data.tar.gz
+          mkdir -p deploy && mv luci-app-ech-workers_k3.ipk deploy/
+
+      - name: Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: v${{ github.run_number }}
+          files: deploy/*.ipk
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
