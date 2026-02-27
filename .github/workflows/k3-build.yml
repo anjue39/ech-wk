@@ -1,4 +1,4 @@
-name: K3-Go-IPK-Build
+name: K3-ECH-Full-Featured-Build
 
 on:
   workflow_dispatch:
@@ -6,58 +6,140 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
-    permissions: # 必须开启写入权限，否则无法发布 Release
+    permissions:
       contents: write
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Go
-        uses: actions/setup-go@v4
-        with:
-          go-version: '1.21'
-          cache: true
-
-      - name: Build Binary (ARMv7 Static)
+      - name: Build Binary
         run: |
-          # 1. 确保在源码根目录下初始化 Go 环境
-          if [ ! -f "go.mod" ]; then
-            go mod init ech-workers
-          fi
-          
-          # 2. 自动下载缺失的依赖 (如 gorilla/websocket)
+          [ -f "go.mod" ] || go mod init ech-workers
           go mod tidy
-          
-          # 3. 执行静态编译
           CGO_ENABLED=0 GOOS=linux GOARCH=arm GOARM=7 \
           go build -trimpath -ldflags="-s -w" -o ech-workers ech-workers.go
-          
-          # 4. 准备打包目录结构
-          mkdir -p luci/root/usr/bin/
-          cp ech-workers luci/root/usr/bin/
-          chmod +x luci/root/usr/bin/ech-workers
 
-      - name: Build IPK via SDK
-        uses: immortalwrt/gh-action-sdk@master
-        with:
-          architecture: arm_cortex-a9_vfpv3-d16
-          pkgdir: luci
-
-      - name: Collect IPK Files
+      - name: Prepare Files
         run: |
-          mkdir -p deploy
-          find bin/targets/ -name "*.ipk" -exec cp {} deploy/ \;
-          echo "UPLOAD_PATH=deploy" >> $GITHUB_ENV
+          mkdir -p ipk/CONTROL ipk/usr/bin ipk/etc/init.d ipk/etc/config \
+                   ipk/usr/lib/lua/luci/model/cbi ipk/usr/lib/lua/luci/controller
 
-      - name: Create Release and Upload
+          cp ech-workers ipk/usr/bin/
+          
+          # 1. 写入菜单入口
+          cat <<EOF > ipk/usr/lib/lua/luci/controller/ech-workers.lua
+          module("luci.controller.ech-workers", package.seeall)
+          function index()
+              entry({"admin", "services", "ech-workers"}, cbi("ech-workers"), _("ECH Workers Proxy"), 50).dependent = true
+          end
+          EOF
+
+          # 2. 写入全功能界面模型 (CBI)
+          cat <<EOF > ipk/usr/lib/lua/luci/model/cbi/ech-workers.lua
+          local m, s, o
+
+          m = Map("ech-workers", "ECH Workers Proxy", "基于 Cloudflare Workers 的 ECH 代理服务")
+
+          -- 状态栏 (简单模拟)
+          s = m:section(TypedSection, "config", "基本设置")
+          s.anonymous = true
+
+          -- 基本设置
+          o = s:option(Flag, "enabled", "启用")
+          o.rmempty = false
+
+          o = s:option(Value, "server_addr", "服务器地址", "Workers 服务端地址，格式：域名:端口")
+          o.placeholder = "your-worker.workers.dev:443"
+
+          o = s:option(Value, "listen_addr", "监听地址", "本地代理监听端口")
+          o.default = "0.0.0.0:30001"
+
+          o = s:option(Value, "token", "身份令牌", "服务端验证密钥 (可选)")
+          o.password = true
+
+          -- 高级设置
+          s = m:section(TypedSection, "config", "高级设置")
+          s.anonymous = true
+
+          o = s:option(Value, "up_address", "优选 IP/域名", "Cloudflare CDN 优选地址")
+          o.default = "cf.090227.xyz"
+
+          o = s:option(Value, "doh_url", "DoH 服务器", "用于查询 ECH 配置的 DNS over HTTPS 地址")
+          o.default = "dns.alidns.com/dns-query"
+
+          o = s:option(Value, "ech_host", "ECH 域名", "用于获取 ECH 配置")
+          o.default = "cloudflare-ech.com"
+
+          -- 分流模式
+          o = s:option(ListValue, "mode", "分流模式")
+          o:value("global", "全局代理")
+          o:value("bypass_china", "跳过中国大陆 (推荐)")
+          o:value("direct", "直连模式")
+          o.default = "bypass_china"
+
+          return m
+          EOF
+
+          # 3. 写入全功能初始化配置 (关键：解决“尚无任何配置”问题)
+          cat <<EOF > ipk/etc/config/ech-workers
+          config ech-workers 'config'
+              option enabled '0'
+              option server_addr ''
+              option listen_addr '0.0.0.0:30001'
+              option token ''
+              option up_address 'cf.090227.xyz'
+              option doh_url 'dns.alidns.com/dns-query'
+              option ech_host 'cloudflare-ech.com'
+              option mode 'bypass_china'
+          EOF
+
+          # 4. 启动脚本 (需要根据实际程序的参数名微调 -w -l 等)
+          cat <<EOF > ipk/etc/init.d/ech-workers
+          #!/bin/sh /etc/rc.common
+          START=99
+          USE_PROCD=1
+          start_service() {
+              config_load ech-workers
+              local enabled server_addr listen_addr token up_address doh_url mode
+              config_get_bool enabled config enabled 0
+              [ "\$enabled" -eq 1 ] || return
+              config_get server_addr config server_addr
+              config_get listen_addr config listen_addr "0.0.0.0:30001"
+              config_get token config token
+              config_get up_address config up_address "cf.090227.xyz"
+              
+              procd_open_instance
+              # 注意：这里的参数 -w -l -t 等需要与你 go 代码中的 flag 对应
+              procd_set_param command /usr/bin/ech-workers \\
+                  -w "\$server_addr" \\
+                  -l "\$listen_addr" \\
+                  -t "\$token" \\
+                  -up "\$up_address"
+              procd_set_param respawn
+              procd_close_instance
+          }
+          EOF
+          chmod 755 ipk/etc/init.d/ech-workers ipk/usr/bin/ech-workers
+
+          # 5. 打包
+          cat <<EOF > ipk/CONTROL/control
+          Package: luci-app-ech-workers
+          Version: 2.2.0
+          Architecture: all
+          Description: ECH Workers Proxy Full Featured
+          EOF
+          
+          cd ipk
+          tar -czf ../data.tar.gz --exclude=CONTROL .
+          cd CONTROL && tar -czf ../../control.tar.gz . && cd ../..
+          echo "2.0" > debian-binary
+          tar -czf luci-app-ech-workers_k3.ipk debian-binary data.tar.gz control.tar.gz
+          mkdir -p deploy && mv luci-app-ech-workers_k3.ipk deploy/
+
+      - name: Release
         uses: softprops/action-gh-release@v1
         with:
           tag_name: v${{ github.run_number }}
-          name: K3 专用版 ECH-Workers v${{ github.run_number }}
-          body: |
-            这是专为斐讯 K3 (ARMv7) 编译的静态版 ECH-Workers。
-            - 核心已包含在 IPK 内，无需联网下载。
-            - 采用 GOARM=7 静态编译，解决运行报错问题。
           files: deploy/*.ipk
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
