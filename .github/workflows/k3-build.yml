@@ -1,4 +1,4 @@
-name: K3-Perfect-Match-v1.8
+name: K3-Perfect-Match-Build
 
 on:
   workflow_dispatch:
@@ -12,42 +12,40 @@ jobs:
       - name: Checkout Source
         uses: actions/checkout@v4
 
-      - name: Build Binary (The "Core")
+      - name: Build Binary (ARMv5 Compatibility)
         run: |
-          # 1. 初始化并编译
-          # 使用 GOARM=5 是为了避开某些 K3 固件对 v7 浮点指令集的识别故障
+          # 采用 ARMv5 编译，这是解决“跑不起来”的终极兼容方案
           [ -f "go.mod" ] || go mod init ech-workers
           go mod tidy
           CGO_ENABLED=0 GOOS=linux GOARCH=arm GOARM=5 \
           go build -trimpath -ldflags="-s -w" -o ech-workers ech-workers.go
 
-      - name: Pack IPK (The "Shell")
+      - name: Pack IPK (Direct Adapt)
         run: |
-          # 2. 准备所有目录
+          # 1. 建立目录
           mkdir -p ipk/usr/bin ipk/etc/init.d ipk/etc/config \
                    ipk/usr/lib/lua/luci/model/cbi \
                    ipk/usr/lib/lua/luci/controller \
                    ipk/CONTROL
 
-          # 3. 放入二进制文件
-          cp ech-workers ipk/usr/bin/
-          chmod +x ipk/usr/bin/ech-workers
+          # 2. 放入核心程序
+          cp ech-workers ipk/usr/bin/ && chmod +x ipk/usr/bin/ech-workers
 
-          # 4. 适配 SunshineList 的 UI 逻辑
-          # 这个 Lua 脚本定义的 Map 叫 "ech-workers"，Section 叫 "config"
+          # 3. 仿照 SunshineList 的逻辑生成文件 (确保 100% 匹配)
+          # 界面 Model
           cat <<EOF > ipk/usr/lib/lua/luci/model/cbi/ech-workers.lua
           local m, s, o
-          m = Map("ech-workers", "ECH Workers Proxy", "K3 ARMv5 兼容版")
+          m = Map("ech-workers", "ECH Workers Proxy", "K3 ARMv7 (v5兼容编译)")
           s = m:section(TypedSection, "config", "基本设置")
           s.anonymous = true
           o = s:option(Flag, "enabled", "启用")
           o = s:option(Value, "server_addr", "Worker 域名")
-          o = s:option(Value, "listen_addr", "监听地址")
+          o = s:option(Value, "listen_addr", "本地监听地址")
           o.default = "0.0.0.0:30001"
           return m
           EOF
 
-          # 5. 补全菜单入口
+          # 菜单 Controller
           cat <<EOF > ipk/usr/lib/lua/luci/controller/ech-workers.lua
           module("luci.controller.ech-workers", package.seeall)
           function index()
@@ -55,16 +53,15 @@ jobs:
           end
           EOF
 
-          # 6. 核心：强行对齐配置文件 (解决显示“无配置”的问题)
-          # 注意：这里的第一个 config 是类型，第二个 config 是名字，必须和 Lua 里的 TypedSection 对应
+          # 4. 关键：对齐 SunshineList 所需的配置文件格式
           cat <<EOF > ipk/etc/config/ech-workers
-          config config 'config'
+          config config
               option enabled '0'
               option server_addr ''
               option listen_addr '0.0.0.0:30001'
           EOF
 
-          # 7. 启动脚本
+          # 5. 启动脚本 (兼容性处理)
           cat <<EOF > ipk/etc/init.d/ech-workers
           #!/bin/sh /etc/rc.common
           START=99
@@ -84,25 +81,20 @@ jobs:
           EOF
           chmod +x ipk/etc/init.d/ech-workers
 
-          # 8. 打包控制文件
+          # 6. 打包
           cat <<EOF > ipk/CONTROL/control
           Package: luci-app-ech-workers
-          Version: 1.8.0
+          Version: 1.7.0
           Architecture: all
           Depends: curl, ca-certificates
-          Description: K3 ECH-Workers ARMv5 Compatible
+          Description: K3 ECH-Workers based on SunshineList UI
           EOF
           
-          # 9. 执行标准打包过程
-          cd ipk
-          tar -czf ../control.tar.gz ./CONTROL
-          tar -czf ../data.tar.gz --exclude=CONTROL .
-          cd ..
-          echo "2.0" > debian-binary
-          ar r luci-app-ech-workers_k3.ipk debian-binary control.tar.gz data.tar.gz
+          cd ipk && tar -czf ../control.tar.gz ./CONTROL && tar -czf ../data.tar.gz --exclude=CONTROL . && cd ..
+          echo "2.0" > debian-binary && ar r luci-app-ech-workers_k3.ipk debian-binary control.tar.gz data.tar.gz
           mkdir -p deploy && mv luci-app-ech-workers_k3.ipk deploy/
 
-      - name: Release IPK
+      - name: Release
         uses: softprops/action-gh-release@v1
         with:
           tag_name: v${{ github.run_number }}
