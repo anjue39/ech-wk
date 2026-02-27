@@ -1,4 +1,4 @@
-name: K3-ECH-Pro-Build
+name: K3-ECH-Pro-v4-Final
 
 on:
   workflow_dispatch:
@@ -16,24 +16,23 @@ jobs:
         run: |
           [ -f "go.mod" ] || go mod init ech-workers
           go mod tidy
-          CGO_ENABLED=0 GOOS=linux GOARCH=arm GOARM=7 \
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm GOARCH=arm GOARM=7 \
           go build -trimpath -ldflags="-s -w" -o ech-workers ech-workers.go
 
       - name: Pack IPK
         run: |
+          # 建立标准目录
           mkdir -p ipk/CONTROL ipk/usr/bin ipk/etc/init.d ipk/etc/config \
                    ipk/usr/lib/lua/luci/model/cbi ipk/usr/lib/lua/luci/controller
 
           cp ech-workers ipk/usr/bin/
 
-          # 1. 增强版 Controller (支持状态接口)
+          # 1. Controller: 确保 cbi("ech-workers") 对应 model/cbi/ 下的文件
           cat <<EOF > ipk/usr/lib/lua/luci/controller/ech-workers.lua
           module("luci.controller.ech-workers", package.seeall)
           function index()
               if not nixio.fs.access("/etc/config/ech-workers") then return end
-              -- 菜单入口
               entry({"admin", "services", "ech-workers"}, cbi("ech-workers"), _("ECH Workers Proxy"), 50).dependent = true
-              -- 状态检测接口 (用于在界面显示“运行中”)
               entry({"admin", "services", "ech-workers", "status"}, call("act_status")).leaf = true
           end
 
@@ -45,30 +44,29 @@ jobs:
           end
           EOF
 
-          # 2. 满配版界面模型 (CBI) - 参照 SunshineList 布局
+          # 2. Model: 必须叫 ech-workers.lua (对应上面的 cbi 入口)
           cat <<EOF > ipk/usr/lib/lua/luci/model/cbi/ech-workers.lua
           local m, s, o
           local sys = require "luci.sys"
 
-          m = Map("ech-workers", "ECH Workers Proxy", "基于 Cloudflare Workers 的高效代理工具")
+          m = Map("ech-workers", "ECH Workers Proxy", "基于 Cloudflare Workers 的 ECH 代理")
 
-          -- 状态显示区
+          -- 状态显示
           s = m:section(TypedSection, "config")
           s.anonymous = true
-          s.description = translate("服务状态: ") .. (sys.call("pgrep -f /usr/bin/ech-workers >/dev/null") == 0 
+          s.description = "服务状态: " .. (sys.call("pgrep -f /usr/bin/ech-workers >/dev/null") == 0 
               and "<font color='green'><b>运行中</b></font>" 
               or "<font color='red'><b>未运行</b></font>")
 
           -- 基本设置
           s = m:section(NamedSection, "config", "ech-workers", "基本设置")
-          s.anonymous = true
           s.addremove = false
 
-          o = s:option(Flag, "enabled", "启用")
+          o = s:option(Flag, "enabled", "启用", "开启或关闭代理服务")
           o.rmempty = false
 
-          o = s:option(Value, "server_addr", "服务器地址", "示例: your-worker.workers.dev:443")
-          o.rmempty = false
+          o = s:option(Value, "server_addr", "服务器地址", "Worker 域名:端口")
+          o.placeholder = "your.workers.dev:443"
 
           o = s:option(Value, "listen_addr", "监听地址")
           o.default = "0.0.0.0:30001"
@@ -76,7 +74,7 @@ jobs:
           o = s:option(Value, "token", "身份令牌", "服务端验证密钥 (可选)")
           o.password = true
 
-          -- 高级设置 (参照地址参数)
+          -- 高级设置
           s = m:section(NamedSection, "config", "ech-workers", "高级设置")
           
           o = s:option(Value, "up_address", "优选 IP/域名")
@@ -90,14 +88,26 @@ jobs:
 
           o = s:option(ListValue, "mode", "分流模式")
           o:value("global", "全局代理")
-          o:value("bypass_china", "跳过中国大陆 (推荐)")
+          o:value("bypass_china", "跳过中国大陆")
           o:value("direct", "直连模式")
           o.default = "bypass_china"
 
           return m
           EOF
 
-          # 3. 标准启动脚本 (支持 Procd 自动保活)
+          # 3. 配置文件
+          cat <<EOF > ipk/etc/config/ech-workers
+          config ech-workers 'config'
+              option enabled '0'
+              option server_addr ''
+              option listen_addr '0.0.0.0:30001'
+              option up_address 'cf.090227.xyz'
+              option doh_url 'dns.alidns.com/dns-query'
+              option ech_host 'cloudflare-ech.com'
+              option mode 'bypass_china'
+          EOF
+
+          # 4. 启动脚本
           cat <<EOF > ipk/etc/init.d/ech-workers
           #!/bin/sh /etc/rc.common
           START=99
@@ -121,47 +131,30 @@ jobs:
                   -t "\$token" \\
                   -up "\$up_address"
               procd_set_param respawn
-              procd_set_param stdout 1
-              procd_set_param stderr 1
               procd_close_instance
-          }
-
-          stop_service() {
-              killall ech-workers
           }
           EOF
           chmod 755 ipk/etc/init.d/ech-workers ipk/usr/bin/ech-workers
 
-          # 4. 初始化默认配置
-          cat <<EOF > ipk/etc/config/ech-workers
-          config ech-workers 'config'
-              option enabled '0'
-              option server_addr ''
-              option listen_addr '0.0.0.0:30001'
-              option up_address 'cf.090227.xyz'
-              option mode 'bypass_china'
-          EOF
-
           # 5. 打包
           cat <<EOF > ipk/CONTROL/control
           Package: luci-app-ech-workers
-          Version: 3.0.0
+          Version: 4.0.0
           Architecture: all
-          Description: Pro version of ECH Workers Proxy for K3
+          Description: Final Pro Version for K3
           EOF
           
           cd ipk
           tar -czf ../data.tar.gz --exclude=CONTROL .
           cd CONTROL && tar -czf ../../control.tar.gz . && cd ../..
           echo "2.0" > debian-binary
-          tar -czf luci-app-ech-workers_k3.ipk debian-binary data.tar.gz control.tar.gz
-          mkdir -p ../deploy && mv luci-app-ech-workers_k3.ipk ../deploy/
+          tar -czf luci-app-ech-workers_v4_k3.ipk debian-binary data.tar.gz control.tar.gz
+          mkdir -p ../deploy && mv luci-app-ech-workers_v4_k3.ipk ../deploy/
 
       - name: Release IPK
         uses: softprops/action-gh-release@v1
         with:
           tag_name: v${{ github.run_number }}
-          name: K3-Pro-Full-v${{ github.run_number }}
           files: deploy/*.ipk
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
