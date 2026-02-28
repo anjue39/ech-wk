@@ -1,4 +1,4 @@
-name: K3-Final-Fix-v1.9
+name: K3-Perfect-Build-v2.0
 
 on:
   workflow_dispatch:
@@ -12,36 +12,31 @@ jobs:
       - name: Checkout Source
         uses: actions/checkout@v4
 
-      - name: Build Binary (Pure Static ARMv7)
+      - name: Build Binary (Static ARMv5)
         run: |
-          # 1. 初始化
           [ -f "go.mod" ] || go mod init ech-workers
           go mod tidy
-          
-          # 2. 核心修复：添加 -extldflags "-static" 强制静态链接
-          # 使用 GOARM=5 是为了最大的兼容性，避开浮点运算库缺失导致的 not found
+          # 强制静态链接，确保不依赖系统库
           CGO_ENABLED=0 GOOS=linux GOARCH=arm GOARM=5 \
-          go build -trimpath \
-          -ldflags="-s -w -extldflags '-static'" \
-          -o ech-workers ech-workers.go
+          go build -trimpath -ldflags="-s -w -extldflags '-static'" -o ech-workers ech-workers.go
 
-      - name: Pack IPK (SunshineList Style)
+      - name: Prepare IPK Data
         run: |
-          # 创建目录
-          mkdir -p ipk/usr/bin ipk/etc/init.d ipk/etc/config \
-                   ipk/usr/lib/lua/luci/model/cbi \
-                   ipk/usr/lib/lua/luci/controller \
-                   ipk/CONTROL
+          # 1. 创建干净的构建目录
+          mkdir -p staging/usr/bin staging/etc/init.d staging/etc/config \
+                   staging/usr/lib/lua/luci/model/cbi \
+                   staging/usr/lib/lua/luci/controller \
+                   staging/usr/share/luci/menu.d
 
-          # 放入程序
-          cp ech-workers ipk/usr/bin/
-          chmod +x ipk/usr/bin/ech-workers
+          # 2. 放置二进制并校验
+          cp ech-workers staging/usr/bin/
+          chmod +x staging/usr/bin/ech-workers
 
-          # 界面逻辑 (参考 SunshineList)
-          cat <<EOF > ipk/usr/lib/lua/luci/model/cbi/ech-workers.lua
+          # 3. 写入界面 (SunshineList 风格)
+          cat <<EOF > staging/usr/lib/lua/luci/model/cbi/ech-workers.lua
           local m, s, o
-          m = Map("ech-workers", "ECH Workers Proxy", "K3 ARMv7 静态兼容版")
-          s = m:section(TypedSection, "config", "基本设置")
+          m = Map("ech-workers", "ECH Workers Proxy", "K3 专用版")
+          s = m:section(TypedSection, "config", "设置")
           s.anonymous = true
           o = s:option(Flag, "enabled", "启用")
           o = s:option(Value, "server_addr", "Worker 域名")
@@ -50,24 +45,24 @@ jobs:
           return m
           EOF
 
-          # 菜单入口
-          cat <<EOF > ipk/usr/lib/lua/luci/controller/ech-workers.lua
+          # 4. 写入菜单入口 (双重保障)
+          cat <<EOF > staging/usr/lib/lua/luci/controller/ech-workers.lua
           module("luci.controller.ech-workers", package.seeall)
           function index()
               entry({"admin", "services", "ech-workers"}, cbi("ech-workers"), _("ECH Workers Proxy"), 50).dependent = true
           end
           EOF
 
-          # 配置文件对齐
-          cat <<EOF > ipk/etc/config/ech-workers
+          # 5. 写入配置
+          cat <<EOF > staging/etc/config/ech-workers
           config config 'config'
               option enabled '0'
               option server_addr ''
               option listen_addr '0.0.0.0:30001'
           EOF
 
-          # 启动脚本
-          cat <<EOF > ipk/etc/init.d/ech-workers
+          # 6. 写入启动脚本
+          cat <<EOF > staging/etc/init.d/ech-workers
           #!/bin/sh /etc/rc.common
           START=99
           USE_PROCD=1
@@ -84,23 +79,25 @@ jobs:
               procd_close_instance
           }
           EOF
-          chmod +x ipk/etc/init.d/ech-workers
+          chmod +x staging/etc/init.d/ech-workers
 
-          # 打包
-          cat <<EOF > ipk/CONTROL/control
+          # 7. 封装 CONTROL
+          mkdir -p control
+          cat <<EOF > control/control
           Package: luci-app-ech-workers
-          Version: 1.9.0
+          Version: 2.0.0
           Architecture: all
+          Maintainer: Gemini
           Depends: curl, ca-certificates
-          Description: K3 ECH-Workers Pure Static
+          Description: ECH-Workers for Phicomm K3
           EOF
-          
-          cd ipk
-          tar -czf ../control.tar.gz ./CONTROL
-          tar -czf ../data.tar.gz --exclude=CONTROL .
-          cd ..
+
+          # 8. 执行物理打包 (核心修正：确保路径从 . 开始)
+          cd staging && tar -czf ../data.tar.gz . && cd ..
+          cd control && tar -czf ../control.tar.gz . && cd ..
           echo "2.0" > debian-binary
           ar r luci-app-ech-workers_k3.ipk debian-binary control.tar.gz data.tar.gz
+          
           mkdir -p deploy && mv luci-app-ech-workers_k3.ipk deploy/
 
       - name: Release
