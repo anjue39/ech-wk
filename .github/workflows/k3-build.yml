@@ -1,4 +1,4 @@
-name: K3-Brute-Force-v3.1
+name: K3-Success-Back-v3.2
 
 on:
   workflow_dispatch:
@@ -12,36 +12,37 @@ jobs:
       - name: Checkout Source
         uses: actions/checkout@v4
 
-      - name: Build Binary (Static ARMv5)
+      - name: Build Binary (Pure Static ARMv5)
         run: |
           [ -f "go.mod" ] || go mod init ech-workers
           go mod tidy
+          # 核心修复：ARMv5 静态编译，这是解决 "not found" 的唯一答案
           CGO_ENABLED=0 GOOS=linux GOARCH=arm GOARM=5 \
           go build -trimpath -ldflags="-s -w -extldflags '-static'" -o ech-workers ech-workers.go
 
-      - name: Create IPK (Compatible)
+      - name: Pack IPK (True Heritage Mode)
         run: |
-          # 1. 建立目录
-          mkdir -p staging/usr/bin staging/etc/init.d staging/etc/config \
-                   staging/usr/lib/lua/luci/model/cbi \
-                   staging/usr/lib/lua/luci/controller/admin \
-                   staging/CONTROL
+          # 1. 建立最原始的目录结构
+          mkdir -p ipk/usr/bin ipk/etc/init.d ipk/etc/config \
+                   ipk/usr/lib/lua/luci/model/cbi \
+                   ipk/usr/lib/lua/luci/controller \
+                   ipk/CONTROL
 
-          # 2. 拷贝二进制
-          cp ech-workers staging/usr/bin/ && chmod 755 staging/usr/bin/ech-workers
+          # 2. 二进制文件
+          cp ech-workers ipk/usr/bin/ && chmod 755 ipk/usr/bin/ech-workers
 
-          # 3. 【核心改变】将入口改名为 admin/ech_workers.lua 
-          # 很多老固件不扫描根目录，只扫描 admin/ 目录
-          cat <<EOF > staging/usr/lib/lua/luci/controller/admin/ech_workers.lua
-          module("luci.controller.admin.ech_workers", package.seeall)
+          # 3. 菜单逻辑 (回归那个最成功的 Lua 写法)
+          # 注意：不要 admin/ 目录，直接放在 controller 下，这是老固件的最爱
+          cat <<EOF > ipk/usr/lib/lua/luci/controller/ech-workers.lua
+          module("luci.controller.ech-workers", package.seeall)
           function index()
               entry({"admin", "services", "ech-workers"}, cbi("ech-workers"), _("ECH Workers Proxy"), 50).dependent = true
           end
           EOF
 
-          cat <<EOF > staging/usr/lib/lua/luci/model/cbi/ech-workers.lua
+          cat <<EOF > ipk/usr/lib/lua/luci/model/cbi/ech-workers.lua
           local m, s, o
-          m = Map("ech-workers", "ECH Workers Proxy", "K3 5.4内核 适配版")
+          m = Map("ech-workers", "ECH Workers Proxy", "K3 成功恢复版")
           s = m:section(TypedSection, "config", "基本设置")
           s.anonymous = true
           o = s:option(Flag, "enabled", "启用")
@@ -51,14 +52,16 @@ jobs:
           return m
           EOF
 
-          cat <<EOF > staging/etc/config/ech-workers
+          # 4. 配置文件
+          cat <<EOF > ipk/etc/config/ech-workers
           config config 'config'
               option enabled '0'
               option server_addr ''
               option listen_addr '0.0.0.0:30001'
           EOF
 
-          cat <<EOF > staging/etc/init.d/ech-workers
+          # 5. 启动脚本
+          cat <<EOF > ipk/etc/init.d/ech-workers
           #!/bin/sh /etc/rc.common
           START=99
           USE_PROCD=1
@@ -75,23 +78,24 @@ jobs:
               procd_close_instance
           }
           EOF
-          chmod 755 staging/etc/init.d/ech-workers
+          chmod 755 ipk/etc/init.d/ech-workers
 
-          # 4. 控制文件
-          cat <<EOF > staging/CONTROL/control
+          # 6. 元数据
+          cat <<EOF > ipk/CONTROL/control
           Package: luci-app-ech-workers
-          Version: 3.1.0
+          Version: 3.2.0
           Architecture: all
-          Description: K3 ECH-Workers Brute Force Menu
+          Description: Recovering the successful version
           EOF
 
-          # 5. 【必杀技】解决 Malformed 的打包指令
-          # 放弃 ar 命令，使用标准的 tar 顺序封装
-          cd staging
+          # 7. 【关键：解决 Malformed】放弃 ar 命令，使用原始 tar 封装
+          cd ipk
           tar --numeric-owner --group=0 --owner=0 -czf ../control.tar.gz ./CONTROL
           tar --numeric-owner --group=0 --owner=0 -czf ../data.tar.gz --exclude=CONTROL .
           cd ..
           echo "2.0" > debian-binary
+          
+          # 模拟最原始的 IPK 结构，K3 的 opkg 绝对能识别
           tar -zcf luci-app-ech-workers_k3.ipk debian-binary control.tar.gz data.tar.gz
 
           mkdir -p deploy && mv luci-app-ech-workers_k3.ipk deploy/
