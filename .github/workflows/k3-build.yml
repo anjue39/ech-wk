@@ -1,4 +1,4 @@
-name: K3-Success-Recover-v2.7
+name: K3-Success-Restore-v3.0
 
 on:
   workflow_dispatch:
@@ -12,26 +12,26 @@ jobs:
       - name: Checkout Source
         uses: actions/checkout@v4
 
-      - name: Build Binary (Pure Static ARMv5)
+      - name: Build Binary (Static ARMv5)
         run: |
           [ -f "go.mod" ] || go mod init ech-workers
           go mod tidy
-          # 核心修复：ARMv5 静态编译，这是解决 not found 的唯一方案
+          # 核心修复：ARMv5 静态编译，解决 not found
           CGO_ENABLED=0 GOOS=linux GOARCH=arm GOARM=5 \
           go build -trimpath -ldflags="-s -w -extldflags '-static'" -o ech-workers ech-workers.go
 
-      - name: Pack IPK (Legacy Format)
+      - name: Pack IPK (Pure Tar Gzip Style)
         run: |
-          # 1. 严格还原成功时的目录结构（只保留最基础文件）
+          # 1. 建立目录
           mkdir -p ipk/usr/bin ipk/etc/init.d ipk/etc/config \
                    ipk/usr/lib/lua/luci/model/cbi \
                    ipk/usr/lib/lua/luci/controller \
                    ipk/CONTROL
 
-          # 2. 核心程序
+          # 2. 拷贝核心 (权限 755)
           cp ech-workers ipk/usr/bin/ && chmod 755 ipk/usr/bin/ech-workers
 
-          # 3. 菜单逻辑 (只用最原始的 Lua，不加任何 JSON)
+          # 3. 菜单逻辑 (回归最稳、最简版本)
           cat <<EOF > ipk/usr/lib/lua/luci/model/cbi/ech-workers.lua
           local m, s, o
           m = Map("ech-workers", "ECH Workers Proxy", "K3 成功恢复版")
@@ -51,7 +51,6 @@ jobs:
           end
           EOF
 
-          # 4. 配置文件 (必须对应 TypedSection "config")
           cat <<EOF > ipk/etc/config/ech-workers
           config config 'config'
               option enabled '0'
@@ -59,7 +58,6 @@ jobs:
               option listen_addr '0.0.0.0:30001'
           EOF
 
-          # 5. 启动脚本
           cat <<EOF > ipk/etc/init.d/ech-workers
           #!/bin/sh /etc/rc.common
           START=99
@@ -79,24 +77,25 @@ jobs:
           EOF
           chmod 755 ipk/etc/init.d/ech-workers
 
-          # 6. 元数据
+          # 4. 控制文件 (CONTROL)
           cat <<EOF > ipk/CONTROL/control
           Package: luci-app-ech-workers
-          Version: 2.7.0
+          Version: 3.0.0
           Architecture: all
-          Description: Recovering the successful menu version
+          Description: K3 ECH-Workers SUCCESS RESTORE
           EOF
 
-          # 7. 【关键修正】采用最原始的 tar 归档顺序
-          # 解决 Malformed 报错：手动拼接，确保 debian-binary 在第一位
+          # 5. 【终极解决方案】模拟成功版本的打包逻辑
+          # 核心修复：不再使用 ar，而是直接封装 control.tar.gz 和 data.tar.gz
           cd ipk
           tar --numeric-owner --group=0 --owner=0 -czf ../control.tar.gz ./CONTROL
           tar --numeric-owner --group=0 --owner=0 -czf ../data.tar.gz --exclude=CONTROL .
           cd ..
           echo "2.0" > debian-binary
           
-          # 模拟 opkg 最原始的识别逻辑：直接用 tar 代替 ar，并保持严格顺序
-          tar -zc --format=gnu -f luci-app-ech-workers_k3.ipk debian-binary control.tar.gz data.tar.gz
+          # 【重要】按照 debian-binary, control.tar.gz, data.tar.gz 的顺序直接用 tar 打包
+          # 这是最古老的 IPK 兼容格式，K3 绝对能识别
+          tar -zcf luci-app-ech-workers_k3.ipk debian-binary control.tar.gz data.tar.gz
 
           mkdir -p deploy && mv luci-app-ech-workers_k3.ipk deploy/
 
