@@ -1,4 +1,4 @@
-name: K3-Success-Restore-v3.3
+name: K3-Ultimate-Restore-v3.4
 
 on:
   workflow_dispatch:
@@ -16,22 +16,21 @@ jobs:
         run: |
           [ -f "go.mod" ] || go mod init ech_workers
           go mod tidy
-          # 核心：ARMv5 静态编译，解决 not found
           CGO_ENABLED=0 GOOS=linux GOARCH=arm GOARM=5 \
           go build -trimpath -ldflags="-s -w -extldflags '-static'" -o ech_workers ech-workers.go
 
-      - name: Pack IPK (Legacy Tarball Format)
+      - name: Pack IPK (Legacy Format)
         run: |
-          # 1. 建立目录 (注意：全部改为下划线 ech_workers)
+          # 1. 建立目录
           mkdir -p ipk/usr/bin ipk/etc/init.d ipk/etc/config \
                    ipk/usr/lib/lua/luci/model/cbi \
                    ipk/usr/lib/lua/luci/controller \
                    ipk/CONTROL
 
-          # 2. 拷贝核心
+          # 2. 核心程序
           cp ech_workers ipk/usr/bin/ && chmod 755 ipk/usr/bin/ech_workers
 
-          # 3. 菜单逻辑 (严格对齐 SunshineList 成功逻辑)
+          # 3. 菜单逻辑 (严格还原成功版：路径不带 admin，模块名加下划线)
           cat <<EOF > ipk/usr/lib/lua/luci/controller/ech_workers.lua
           module("luci.controller.ech_workers", package.seeall)
           function index()
@@ -41,7 +40,7 @@ jobs:
 
           cat <<EOF > ipk/usr/lib/lua/luci/model/cbi/ech_workers.lua
           local m, s, o
-          m = Map("ech_workers", "ECH Workers Proxy", "K3 成功恢复版")
+          m = Map("ech_workers", "ECH Workers Proxy", "K3 5.4内核 恢复版")
           s = m:section(TypedSection, "config", "基本设置")
           s.anonymous = true
           o = s:option(Flag, "enabled", "启用")
@@ -51,7 +50,6 @@ jobs:
           return m
           EOF
 
-          # 4. 配置文件 (注意：文件名和内容都要对齐)
           cat <<EOF > ipk/etc/config/ech_workers
           config config 'config'
               option enabled '0'
@@ -59,7 +57,6 @@ jobs:
               option listen_addr '0.0.0.0:30001'
           EOF
 
-          # 5. 启动脚本
           cat <<EOF > ipk/etc/init.d/ech_workers
           #!/bin/sh /etc/rc.common
           START=99
@@ -79,20 +76,22 @@ jobs:
           EOF
           chmod 755 ipk/etc/init.d/ech_workers
 
-          # 6. 元数据
+          # 4. 元数据
           cat <<EOF > ipk/CONTROL/control
           Package: luci-app-ech-workers
-          Version: 3.3.0
+          Version: 3.4.0
           Architecture: all
-          Description: Final Success Version for K3
+          Description: Recovering the successful version
           EOF
 
-          # 7. 终极兼容打包
+          # 5. 【核心修复】解决 Malformed：模拟老版 IPK 的 tar 结构
           cd ipk
           tar --numeric-owner --group=0 --owner=0 -czf ../control.tar.gz ./CONTROL
           tar --numeric-owner --group=0 --owner=0 -czf ../data.tar.gz --exclude=CONTROL .
           cd ..
           echo "2.0" > debian-binary
+          
+          # 关键：严格按顺序用 tar 封装，不使用 ar
           tar -zcf luci-app-ech-workers_k3.ipk debian-binary control.tar.gz data.tar.gz
 
           mkdir -p deploy && mv luci-app-ech-workers_k3.ipk deploy/
