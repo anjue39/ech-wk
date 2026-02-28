@@ -1,4 +1,4 @@
-name: K3-Force-Menu-v2.3
+name: K3-Success-Return-v2.5
 
 on:
   workflow_dispatch:
@@ -16,22 +16,23 @@ jobs:
         run: |
           [ -f "go.mod" ] || go mod init ech-workers
           go mod tidy
+          # 静态编译 + ARMv5 是解决 "not found" 的唯一答案
           CGO_ENABLED=0 GOOS=linux GOARCH=arm GOARM=5 \
           go build -trimpath -ldflags="-s -w -extldflags '-static'" -o ech-workers ech-workers.go
 
-      - name: Create Standard IPK
+      - name: Pack IPK (Legacy Compatible Format)
         run: |
-          # 1. 准备文件系统
-          mkdir -p staging/usr/bin staging/etc/init.d staging/etc/config \
-                   staging/usr/lib/lua/luci/model/cbi \
-                   staging/usr/lib/lua/luci/controller \
-                   staging/usr/share/luci/menu.d \
-                   staging/usr/share/rpcd/acl.d
-          
-          cp ech-workers staging/usr/bin/ && chmod +x staging/usr/bin/ech-workers
+          # 1. 严格模仿 SunshineList 的目录结构
+          mkdir -p ipk/usr/bin ipk/etc/init.d ipk/etc/config \
+                   ipk/usr/lib/lua/luci/model/cbi \
+                   ipk/usr/lib/lua/luci/controller \
+                   ipk/CONTROL
 
-          # 【UI 逻辑】
-          cat <<EOF > staging/usr/lib/lua/luci/model/cbi/ech-workers.lua
+          # 2. 核心程序
+          cp ech-workers ipk/usr/bin/ && chmod 755 ipk/usr/bin/ech-workers
+
+          # 3. 菜单逻辑 (参考之前最成功的版本)
+          cat <<EOF > ipk/usr/lib/lua/luci/model/cbi/ech-workers.lua
           local m, s, o
           m = Map("ech-workers", "ECH Workers Proxy", "K3 5.4内核 适配版")
           s = m:section(TypedSection, "config", "基本设置")
@@ -43,44 +44,23 @@ jobs:
           return m
           EOF
 
-          # 【菜单入口】双重保障
-          cat <<EOF > staging/usr/lib/lua/luci/controller/ech-workers.lua
+          cat <<EOF > ipk/usr/lib/lua/luci/controller/ech-workers.lua
           module("luci.controller.ech-workers", package.seeall)
           function index()
               entry({"admin", "services", "ech-workers"}, cbi("ech-workers"), _("ECH Workers Proxy"), 50).dependent = true
           end
           EOF
 
-          cat <<EOF > staging/usr/share/luci/menu.d/luci-app-ech-workers.json
-          {
-              "admin/services/ech-workers": {
-                  "title": "ECH Workers Proxy",
-                  "order": 50,
-                  "action": { "type": "model", "path": "ech-workers" }
-              }
-          }
-          EOF
-
-          # 【ACL 权限】
-          cat <<EOF > staging/usr/share/rpcd/acl.d/luci-app-ech-workers.json
-          {
-              "luci-app-ech-workers": {
-                  "description": "Grant access to ECH Workers",
-                  "read": { "cgi-bin": [ "luci" ], "uci": [ "ech-workers" ] },
-                  "write": { "uci": [ "ech-workers" ] }
-              }
-          }
-          EOF
-
-          # 【配置与启动脚本】
-          cat <<EOF > staging/etc/config/ech-workers
+          # 4. 配置文件 (必须对应 TypedSection "config")
+          cat <<EOF > ipk/etc/config/ech-workers
           config config 'config'
               option enabled '0'
               option server_addr ''
               option listen_addr '0.0.0.0:30001'
           EOF
 
-          cat <<EOF > staging/etc/init.d/ech-workers
+          # 5. 启动脚本 (Procd 模式)
+          cat <<EOF > ipk/etc/init.d/ech-workers
           #!/bin/sh /etc/rc.common
           START=99
           USE_PROCD=1
@@ -97,35 +77,28 @@ jobs:
               procd_close_instance
           }
           EOF
-          chmod +x staging/etc/init.d/ech-workers
+          chmod 755 ipk/etc/init.d/ech-workers
 
-          # 2. 准备控制逻辑 (核心修复：postinst)
-          mkdir -p control
-          cat <<EOF > control/control
+          # 6. 元数据
+          cat <<EOF > ipk/CONTROL/control
           Package: luci-app-ech-workers
-          Version: 2.3.0
+          Version: 2.5.0
           Architecture: all
           Depends: curl, ca-certificates
-          Description: ECH-Workers with Force Auto-Index
+          Description: K3 ECH-Workers Success Version
           EOF
 
-          # 【关键】安装后强制执行脚本
-          cat <<EOF > control/postinst
-          #!/bin/sh
-          [ -n "\${IPKG_INSTROOT}" ] || {
-              rm -f /tmp/luci-indexcache /tmp/luci-modulecache
-              /etc/init.d/rpcd restart >/dev/null 2>&1
-              /etc/init.d/uhttpd restart >/dev/null 2>&1
-              exit 0
-          }
-          EOF
-          chmod +x control/postinst
-
-          # 3. 严格打包
-          ( cd staging && tar --numeric-owner --group=0 --owner=0 -czf ../data.tar.gz . )
-          ( cd control && tar --numeric-owner --group=0 --owner=0 -czf ../control.tar.gz . )
+          # 7. 【关键修复】使用更兼容的打包指令
+          # 不使用 ar 命令，直接使用 tar 打包，模拟 opkg-build 的兼容模式
+          cd ipk
+          tar --numeric-owner --group=0 --owner=0 -czf ../control.tar.gz ./CONTROL
+          tar --numeric-owner --group=0 --owner=0 -czf ../data.tar.gz --exclude=CONTROL .
+          cd ..
           echo "2.0" > debian-binary
-          ar rc luci-app-ech-workers_k3.ipk debian-binary control.tar.gz data.tar.gz
+          
+          # 核心修正：使用 tar 按照 debian 顺序封装，解决 Malformed 报错
+          tar -zc --format=gnu -f luci-app-ech-workers_k3.ipk debian-binary control.tar.gz data.tar.gz
+
           mkdir -p deploy && mv luci-app-ech-workers_k3.ipk deploy/
 
       - name: Release
