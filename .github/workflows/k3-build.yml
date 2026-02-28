@@ -1,4 +1,4 @@
-name: K3-Success-Return-v2.5
+name: K3-Success-Recover-v2.7
 
 on:
   workflow_dispatch:
@@ -12,17 +12,17 @@ jobs:
       - name: Checkout Source
         uses: actions/checkout@v4
 
-      - name: Build Binary (Static ARMv5)
+      - name: Build Binary (Pure Static ARMv5)
         run: |
           [ -f "go.mod" ] || go mod init ech-workers
           go mod tidy
-          # 静态编译 + ARMv5 是解决 "not found" 的唯一答案
+          # 核心修复：ARMv5 静态编译，这是解决 not found 的唯一方案
           CGO_ENABLED=0 GOOS=linux GOARCH=arm GOARM=5 \
           go build -trimpath -ldflags="-s -w -extldflags '-static'" -o ech-workers ech-workers.go
 
-      - name: Pack IPK (Legacy Compatible Format)
+      - name: Pack IPK (Legacy Format)
         run: |
-          # 1. 严格模仿 SunshineList 的目录结构
+          # 1. 严格还原成功时的目录结构（只保留最基础文件）
           mkdir -p ipk/usr/bin ipk/etc/init.d ipk/etc/config \
                    ipk/usr/lib/lua/luci/model/cbi \
                    ipk/usr/lib/lua/luci/controller \
@@ -31,10 +31,10 @@ jobs:
           # 2. 核心程序
           cp ech-workers ipk/usr/bin/ && chmod 755 ipk/usr/bin/ech-workers
 
-          # 3. 菜单逻辑 (参考之前最成功的版本)
+          # 3. 菜单逻辑 (只用最原始的 Lua，不加任何 JSON)
           cat <<EOF > ipk/usr/lib/lua/luci/model/cbi/ech-workers.lua
           local m, s, o
-          m = Map("ech-workers", "ECH Workers Proxy", "K3 5.4内核 适配版")
+          m = Map("ech-workers", "ECH Workers Proxy", "K3 成功恢复版")
           s = m:section(TypedSection, "config", "基本设置")
           s.anonymous = true
           o = s:option(Flag, "enabled", "启用")
@@ -59,7 +59,7 @@ jobs:
               option listen_addr '0.0.0.0:30001'
           EOF
 
-          # 5. 启动脚本 (Procd 模式)
+          # 5. 启动脚本
           cat <<EOF > ipk/etc/init.d/ech-workers
           #!/bin/sh /etc/rc.common
           START=99
@@ -82,21 +82,20 @@ jobs:
           # 6. 元数据
           cat <<EOF > ipk/CONTROL/control
           Package: luci-app-ech-workers
-          Version: 2.5.0
+          Version: 2.7.0
           Architecture: all
-          Depends: curl, ca-certificates
-          Description: K3 ECH-Workers Success Version
+          Description: Recovering the successful menu version
           EOF
 
-          # 7. 【关键修复】使用更兼容的打包指令
-          # 不使用 ar 命令，直接使用 tar 打包，模拟 opkg-build 的兼容模式
+          # 7. 【关键修正】采用最原始的 tar 归档顺序
+          # 解决 Malformed 报错：手动拼接，确保 debian-binary 在第一位
           cd ipk
           tar --numeric-owner --group=0 --owner=0 -czf ../control.tar.gz ./CONTROL
           tar --numeric-owner --group=0 --owner=0 -czf ../data.tar.gz --exclude=CONTROL .
           cd ..
           echo "2.0" > debian-binary
           
-          # 核心修正：使用 tar 按照 debian 顺序封装，解决 Malformed 报错
+          # 模拟 opkg 最原始的识别逻辑：直接用 tar 代替 ar，并保持严格顺序
           tar -zc --format=gnu -f luci-app-ech-workers_k3.ipk debian-binary control.tar.gz data.tar.gz
 
           mkdir -p deploy && mv luci-app-ech-workers_k3.ipk deploy/
