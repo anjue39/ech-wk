@@ -1,4 +1,4 @@
-name: K3-Standard-Build-v2.1
+name: K3-Ultimate-Final-v2.2
 
 on:
   workflow_dispatch:
@@ -16,24 +16,25 @@ jobs:
         run: |
           [ -f "go.mod" ] || go mod init ech-workers
           go mod tidy
-          # 强制静态编译，-ldflags 确保不依赖任何动态库
           CGO_ENABLED=0 GOOS=linux GOARCH=arm GOARM=5 \
           go build -trimpath -ldflags="-s -w -extldflags '-static'" -o ech-workers ech-workers.go
 
-      - name: Create Standard IPK
+      - name: Create Full-Standard IPK
         run: |
-          # 1. 准备 data 目录 (文件存放地)
+          # 1. 创建完整目录树
           mkdir -p staging/usr/bin staging/etc/init.d staging/etc/config \
                    staging/usr/lib/lua/luci/model/cbi \
-                   staging/usr/lib/lua/luci/controller
+                   staging/usr/lib/lua/luci/controller \
+                   staging/usr/share/luci/menu.d \
+                   staging/usr/share/rpcd/acl.d
           
           cp ech-workers staging/usr/bin/
           chmod +x staging/usr/bin/ech-workers
 
-          # 界面逻辑 (SunshineList 风格)
+          # 【界面模型】
           cat <<EOF > staging/usr/lib/lua/luci/model/cbi/ech-workers.lua
           local m, s, o
-          m = Map("ech-workers", "ECH Workers Proxy", "K3 ARMv7 稳定版")
+          m = Map("ech-workers", "ECH Workers Proxy", "K3 ARMv7 完美适配版")
           s = m:section(TypedSection, "config", "基本设置")
           s.anonymous = true
           o = s:option(Flag, "enabled", "启用")
@@ -43,7 +44,7 @@ jobs:
           return m
           EOF
 
-          # 菜单入口
+          # 【菜单入口 - 针对旧版 LuCI】
           cat <<EOF > staging/usr/lib/lua/luci/controller/ech-workers.lua
           module("luci.controller.ech-workers", package.seeall)
           function index()
@@ -51,7 +52,34 @@ jobs:
           end
           EOF
 
-          # 配置文件 (重要：双 config 命名确保界面能读到)
+          # 【菜单入口 - 针对新版 LuCI JSON】
+          cat <<EOF > staging/usr/share/luci/menu.d/luci-app-ech-workers.json
+          {
+              "admin/services/ech-workers": {
+                  "title": "ECH Workers Proxy",
+                  "order": 50,
+                  "action": { "type": "model", "path": "ech-workers" }
+              }
+          }
+          EOF
+
+          # 【关键：ACL 权限补丁】没有这个，新固件不给显示菜单
+          cat <<EOF > staging/usr/share/rpcd/acl.d/luci-app-ech-workers.json
+          {
+              "luci-app-ech-workers": {
+                  "description": "Grant access to ECH Workers config",
+                  "read": {
+                      "cgi-bin": [ "luci" ],
+                      "uci": [ "ech-workers" ]
+                  },
+                  "write": {
+                      "uci": [ "ech-workers" ]
+                  }
+              }
+          }
+          EOF
+
+          # 【配置文件】
           cat <<EOF > staging/etc/config/ech-workers
           config config 'config'
               option enabled '0'
@@ -59,7 +87,7 @@ jobs:
               option listen_addr '0.0.0.0:30001'
           EOF
 
-          # 启动脚本
+          # 【启动脚本】
           cat <<EOF > staging/etc/init.d/ech-workers
           #!/bin/sh /etc/rc.common
           START=99
@@ -79,26 +107,21 @@ jobs:
           EOF
           chmod +x staging/etc/init.d/ech-workers
 
-          # 2. 准备 control 目录 (元数据)
+          # 2. 打包元数据
           mkdir -p control
           cat <<EOF > control/control
           Package: luci-app-ech-workers
-          Version: 2.1.0
+          Version: 2.2.0
           Architecture: all
-          Maintainer: Gemini
           Depends: curl, ca-certificates
-          Description: ECH-Workers for K3
+          Description: ECH-Workers Final Fix for K3
           EOF
 
-          # 3. 严格打包流程 (解决 Malformed 错误的关键)
-          # 注意：tar 时必须使用 --numeric-owner 且顺序固定
+          # 3. 物理打包 (保持严格顺序)
           ( cd staging && tar --numeric-owner --group=0 --owner=0 -czf ../data.tar.gz . )
           ( cd control && tar --numeric-owner --group=0 --owner=0 -czf ../control.tar.gz . )
           echo "2.0" > debian-binary
-          
-          # 使用特定的 ar 参数顺序，确保 opkg 能识别
           ar rc luci-app-ech-workers_k3.ipk debian-binary control.tar.gz data.tar.gz
-          
           mkdir -p deploy && mv luci-app-ech-workers_k3.ipk deploy/
 
       - name: Release
